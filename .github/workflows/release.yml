@@ -73,10 +73,13 @@ jobs:
 
       # lwstub.exe ships signed, which is what makes the embedded uninstaller signed
       # without a second signing pass here.
+      # Locke-Werks/Forge is public, so the workflow's own token can read its releases
+      # and no FORGE_TOKEN secret is needed. If Forge ever goes private again, this
+      # needs a PAT with Contents: read on that repo instead.
       - name: Fetch Forge
         shell: pwsh
         env:
-          GH_TOKEN: ${{ secrets.FORGE_TOKEN }}
+          GH_TOKEN: ${{ github.token }}
         run: |
           gh release download $env:FORGE_VERSION --repo Locke-Werks/Forge `
             --pattern '*.exe' --dir tools
