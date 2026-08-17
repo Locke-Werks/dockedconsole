@@ -1,0 +1,40 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '9.0.x'
+
+      - name: Build
+        run: dotnet build -c Release --nologo
+
+      - name: Publish
+        shell: pwsh
+        run: |
+          dotnet publish -c Release -o stage --nologo
+          $exe = Get-Item stage/dockedconsole.exe
+          "published {0:N1} MB" -f ($exe.Length / 1MB)
+          if (-not $exe.Length) { throw "publish produced nothing" }
+
+      # The release job asserts the tag matches both version strings. Checking they
+      # match each other on every push means a release never fails on a mismatch that
+      # was introduced weeks earlier.
+      - name: Check versions agree
+        shell: pwsh
+        run: |
+          $toml = (Select-String -Path installer.toml -Pattern '^\s*version\s*=\s*"([^"]+)"').Matches[0].Groups[1].Value
+          $csproj = (Select-String -Path DockedConsole.csproj -Pattern '<Version>([^<]+)</Version>').Matches[0].Groups[1].Value
+          "installer.toml=$toml  csproj=$csproj"
+          if ($toml -ne $csproj) { throw "installer.toml $toml does not match DockedConsole.csproj $csproj" }

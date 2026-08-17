@@ -1,0 +1,107 @@
+# Forge installer configuration. Schema: Locke-Werks/Forge docs/config-schema.md
+#
+# Paths use literal strings so a backslash stays a backslash. A TOML basic string
+# would read "\b" in "{InstallDir}\bin" as a backspace.
+
+[product]
+name         = "Docked Console"
+version      = "0.1.0"
+publisher    = "Locke Werks"
+description  = "A terminal docked to the edge of the Windows desktop"
+copyright    = "Copyright (C) 2026 Locke Werks"
+url          = "https://github.com/Locke-Werks/dockedconsole"
+icon         = "assets/dockedconsole.ico"
+# Stable across versions. Keys the single-instance mutex and the upgrade path, so
+# it must never change.
+upgrade_code = "b7a1f0c2-5d38-4e91-9c6a-3f2d8e14b075"
+aumid        = "LockeWerks.DockedConsole"
+
+[install]
+scope     = "machine"
+dir       = '{ProgramFiles}\Locke Werks\Docked Console'
+elevation = "required"
+
+[ui]
+license_text = """
+Docked Console
+Copyright (C) 2026 Locke Werks
+
+This program is free software: you can redistribute it and/or modify it under the
+terms of the GNU General Public License as published by the Free Software
+Foundation, either version 3 of the License, or (at your option) any later
+version.
+
+This program is distributed in the hope that it will be useful, but WITHOUT ANY
+WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A
+PARTICULAR PURPOSE. See the GNU General Public License for more details.
+
+You should have received a copy of the GNU General Public License along with this
+program. If not, see <https://www.gnu.org/licenses/>.
+
+The complete source is at https://github.com/Locke-Werks/dockedconsole
+"""
+
+# Windows 11 22000. The dock embeds a Windows Terminal window, and Terminal is an
+# inbox component from 11 onward.
+[[preflight]]
+type = "os_build"
+min  = 22000
+fail = "Docked Console needs Windows 11 or newer."
+
+# An upgrade cannot overwrite a running copy, and the uninstaller cannot delete one.
+[[preflight]]
+type            = "process_not_running"
+name            = "dockedconsole.exe"
+restart_manager = true
+fail            = "Docked Console is running. Undock it from its tray icon, or run dockedconsole.exe --stop, then try again."
+
+[[preflight]]
+type  = "free_disk_space"
+bytes = 157286400
+fail  = "Docked Console needs about 150 MB free on the install volume."
+
+[[options]]
+id      = "start_menu"
+label   = "Add a Start Menu shortcut"
+detail  = "Puts Docked Console in the Start Menu for everyone on this machine."
+default = true
+
+[[options]]
+id      = "autostart"
+label   = "Start Docked Console when I sign in"
+detail  = "Writes a Run entry to your own profile. Off by default, since the dock takes a permanent bite out of the desktop."
+default = false
+
+[[actions]]
+type   = "shortcut"
+target = '{InstallDir}\dockedconsole.exe'
+name   = "Docked Console"
+when   = "start_menu"
+
+[[actions]]
+type = "arp"
+
+# The autostart entry belongs in the installing user's HKCU, and this installer
+# elevated, so its own HKCU is the administrator's. Under over-the-shoulder UAC that
+# is a different person entirely. `as = "user"` drops back to the interactive user's
+# token and environment, so the Run value lands in the right hive and is owned by
+# someone who can edit it later.
+[[hooks.post_install]]
+id         = "register-autostart"
+run        = "payload:dockedconsole.exe"
+args       = ["--register-autostart"]
+as         = "user"
+when       = "autostart"
+sha256     = "auto"
+timeout_ms = 15000
+vital      = false
+
+[[hooks.pre_uninstall]]
+id         = "unregister-autostart"
+run        = "payload:dockedconsole.exe"
+args       = ["--unregister-autostart"]
+as         = "user"
+when       = "autostart"
+sha256     = "auto"
+timeout_ms = 15000
+vital      = false

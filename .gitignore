@@ -1,0 +1,8 @@
+bin/
+obj/
+dist/
+*.user
+dockedconsole.json
+tools/
+stage/
+*.ico.bak
