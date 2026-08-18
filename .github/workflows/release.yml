@@ -166,6 +166,8 @@ jobs:
             --title "Docked Console ${{ github.ref_name }}" `
             --notes "Signed installer. Run it, and the terminal docks to the right edge of the primary display.
 
+          Fixed since 0.2.0: undocking logged \"FAILED to detach the terminal\" on every clean exit. The check compared the window's parent against null, but a window still carrying WS_CHILD reports the desktop, so the test could never pass. The detach itself always worked; only the check was wrong. It cost three retries and a misleading log line, nothing more.
+
           Docked Console registers a Windows AppBar, so maximized windows stop at its edge instead of covering it. No title bar, no minimize, no close, no taskbar or Alt+Tab entry.
 
           Rewritten in C++. One 325 KB native executable, no .NET runtime to install.
