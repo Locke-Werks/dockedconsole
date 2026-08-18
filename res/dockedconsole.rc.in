@@ -1,0 +1,42 @@
+// Generated from res/dockedconsole.rc.in by configure_file. Edit the .in file.
+// Every version field derives from cmake/DockVersion.cmake.
+#include <windows.h>
+
+#define IDI_APPICON 1
+
+IDI_APPICON ICON "@DOCK_ICON_PATH@"
+
+VS_VERSION_INFO VERSIONINFO
+    FILEVERSION    @DOCK_VERSION_RC@
+    PRODUCTVERSION @DOCK_VERSION_RC@
+    FILEFLAGSMASK  VS_FFI_FILEFLAGSMASK
+#ifdef _DEBUG
+    FILEFLAGS      VS_FF_DEBUG
+#else
+    FILEFLAGS      0x0L
+#endif
+    FILEOS         VOS_NT_WINDOWS32
+    FILETYPE       VFT_APP
+    FILESUBTYPE    VFT2_UNKNOWN
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        BLOCK "040904B0"
+        BEGIN
+            VALUE "CompanyName",      "@DOCK_COMPANY@"
+            VALUE "FileDescription",  "@DOCK_PRODUCT@"
+            VALUE "FileVersion",      "@DOCK_VERSION_RC_STR@"
+            VALUE "InternalName",     "dockedconsole"
+            VALUE "LegalCopyright",   "@DOCK_COPYRIGHT@"
+            VALUE "OriginalFilename", "dockedconsole.exe"
+            VALUE "ProductName",      "@DOCK_PRODUCT@"
+            VALUE "ProductVersion",   "@DOCK_VERSION_RC_STR@"
+        END
+    END
+
+    BLOCK "VarFileInfo"
+    BEGIN
+        // US English, Unicode. Must agree with the StringFileInfo block above.
+        VALUE "Translation", 0x409, 1200
+    END
+END

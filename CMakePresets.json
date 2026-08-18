@@ -1,0 +1,58 @@
+{
+  "version": 6,
+  "cmakeMinimumRequired": { "major": 3, "minor": 28, "patch": 0 },
+  "configurePresets": [
+    {
+      "name": "base",
+      "hidden": true,
+      "binaryDir": "${sourceDir}/build/${presetName}",
+      "installDir": "${sourceDir}/build/${presetName}/install",
+      "cacheVariables": {
+        "CMAKE_MSVC_RUNTIME_LIBRARY": "MultiThreaded$<$<CONFIG:Debug>:Debug>"
+      }
+    },
+    {
+      "name": "vs",
+      "displayName": "Visual Studio 2022 x64",
+      "description": "Works from any shell. No vcvars needed. Use this if in doubt.",
+      "inherits": "base",
+      "generator": "Visual Studio 17 2022",
+      "architecture": "x64"
+    },
+    {
+      "name": "dev",
+      "displayName": "Ninja debug",
+      "description": "Requires an x64 Native Tools prompt.",
+      "inherits": "base",
+      "generator": "Ninja",
+      "cacheVariables": { "CMAKE_BUILD_TYPE": "Debug" }
+    },
+    {
+      "name": "ci",
+      "displayName": "Ninja release, warnings are errors",
+      "inherits": "base",
+      "generator": "Ninja",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "RelWithDebInfo",
+        "DOCK_WERROR": "ON",
+        "DOCK_HARDENING": "ON"
+      }
+    },
+    {
+      "name": "release",
+      "displayName": "Ninja release, the shippable binary",
+      "inherits": "base",
+      "generator": "Ninja",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "DOCK_HARDENING": "ON"
+      }
+    }
+  ],
+  "buildPresets": [
+    { "name": "vs",      "configurePreset": "vs", "configuration": "Debug" },
+    { "name": "dev",     "configurePreset": "dev" },
+    { "name": "ci",      "configurePreset": "ci" },
+    { "name": "release", "configurePreset": "release" }
+  ]
+}

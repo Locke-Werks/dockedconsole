@@ -13,28 +13,53 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: actions/setup-dotnet@v4
-        with:
-          dotnet-version: '9.0.x'
+      # No setup step. windows-latest ships VS2022, CMake and Ninja, and the
+      # Ninja preset picks up the toolchain from the developer environment the
+      # runner already has on PATH.
+      - name: Configure
+        run: cmake --preset ci
 
+      # /WX is on in this preset. A new warning stops the line here rather than
+      # on somebody's machine.
       - name: Build
-        run: dotnet build -c Release --nologo
+        run: cmake --build --preset ci
 
-      - name: Publish
+      - name: Stage
         shell: pwsh
         run: |
-          dotnet publish -c Release -o stage --nologo
+          cmake --install build/ci --prefix stage
           $exe = Get-Item stage/dockedconsole.exe
-          "published {0:N1} MB" -f ($exe.Length / 1MB)
-          if (-not $exe.Length) { throw "publish produced nothing" }
+          "staged {0:N0} KB" -f ($exe.Length / 1KB)
+          if (-not $exe.Length) { throw "install produced nothing" }
 
-      # The release job asserts the tag matches both version strings. Checking they
-      # match each other on every push means a release never fails on a mismatch that
-      # was introduced weeks earlier.
+      # Static CRT, so the binary must not import a VC++ runtime. Catching this
+      # here is the difference between a clean install and "the application was
+      # unable to start correctly" on a machine without the redistributable.
+      - name: Check for a runtime dependency
+        shell: pwsh
+        run: |
+          $dumpbin = Get-ChildItem "C:\Program Files*\Microsoft Visual Studio\2022\*\VC\Tools\MSVC\*\bin\Hostx64\x64\dumpbin.exe" |
+                     Select-Object -First 1
+          $deps = & $dumpbin /DEPENDENTS stage/dockedconsole.exe
+          $deps
+          if ($deps -match 'VCRUNTIME|MSVCP\d|api-ms-win-crt') {
+            throw "the binary imports the C runtime; the static CRT setting has been lost"
+          }
+
+      # The release job asserts the tag matches both version strings. Checking
+      # they match each other on every push means a release never fails on a
+      # mismatch that was introduced weeks earlier.
       - name: Check versions agree
         shell: pwsh
         run: |
-          $toml = (Select-String -Path installer.toml -Pattern '^\s*version\s*=\s*"([^"]+)"').Matches[0].Groups[1].Value
-          $csproj = (Select-String -Path DockedConsole.csproj -Pattern '<Version>([^<]+)</Version>').Matches[0].Groups[1].Value
-          "installer.toml=$toml  csproj=$csproj"
-          if ($toml -ne $csproj) { throw "installer.toml $toml does not match DockedConsole.csproj $csproj" }
+          $toml  = (Select-String -Path installer.toml -Pattern '^\s*version\s*=\s*"([^"]+)"').Matches[0].Groups[1].Value
+          $major = (Select-String -Path cmake/DockVersion.cmake -Pattern 'DOCK_VERSION_MAJOR (\d+)').Matches[0].Groups[1].Value
+          $minor = (Select-String -Path cmake/DockVersion.cmake -Pattern 'DOCK_VERSION_MINOR (\d+)').Matches[0].Groups[1].Value
+          $patch = (Select-String -Path cmake/DockVersion.cmake -Pattern 'DOCK_VERSION_PATCH (\d+)').Matches[0].Groups[1].Value
+          $cmake = "$major.$minor.$patch"
+          $exe   = (Get-Item stage/dockedconsole.exe).VersionInfo.ProductVersion
+          "installer.toml=$toml  DockVersion.cmake=$cmake  linked exe=$exe"
+          if ($toml -ne $cmake) { throw "installer.toml $toml does not match DockVersion.cmake $cmake" }
+          # Catches a stale generated resource, which is the one new failure mode
+          # configure_file introduces.
+          if ($exe -notlike "$cmake*") { throw "linked VERSIONINFO $exe does not match DockVersion.cmake $cmake" }

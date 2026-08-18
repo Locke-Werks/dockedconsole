@@ -24,22 +24,27 @@ jobs:
       - name: Check the tag matches the installer version
         shell: pwsh
         run: |
-          $tag = "${{ github.ref_name }}" -replace '^v', ''
-          $toml = (Select-String -Path installer.toml -Pattern '^\s*version\s*=\s*"([^"]+)"').Matches[0].Groups[1].Value
-          $csproj = (Select-String -Path DockedConsole.csproj -Pattern '<Version>([^<]+)</Version>').Matches[0].Groups[1].Value
-          "tag=$tag  installer.toml=$toml  csproj=$csproj"
-          if ($tag -ne $toml)   { throw "tag $tag does not match installer.toml $toml" }
-          if ($tag -ne $csproj) { throw "tag $tag does not match DockedConsole.csproj $csproj" }
+          $tag   = "${{ github.ref_name }}" -replace '^v', ''
+          $toml  = (Select-String -Path installer.toml -Pattern '^\s*version\s*=\s*"([^"]+)"').Matches[0].Groups[1].Value
+          $major = (Select-String -Path cmake/DockVersion.cmake -Pattern 'DOCK_VERSION_MAJOR (\d+)').Matches[0].Groups[1].Value
+          $minor = (Select-String -Path cmake/DockVersion.cmake -Pattern 'DOCK_VERSION_MINOR (\d+)').Matches[0].Groups[1].Value
+          $patch = (Select-String -Path cmake/DockVersion.cmake -Pattern 'DOCK_VERSION_PATCH (\d+)').Matches[0].Groups[1].Value
+          $cmake = "$major.$minor.$patch"
+          "tag=$tag  installer.toml=$toml  DockVersion.cmake=$cmake"
+          if ($tag -ne $toml)  { throw "tag $tag does not match installer.toml $toml" }
+          if ($tag -ne $cmake) { throw "tag $tag does not match cmake/DockVersion.cmake $cmake" }
 
-      - uses: actions/setup-dotnet@v4
-        with:
-          dotnet-version: '9.0.x'
+      - name: Build
+        run: |
+          cmake --preset release
+          cmake --build --preset release
 
-      # Self contained, so an install carries no .NET runtime prerequisite.
+      # Static CRT, so an install carries no runtime prerequisite and the payload
+      # is a single file.
       - name: Stage the payload
         shell: pwsh
         run: |
-          dotnet publish -c Release -o stage
+          cmake --install build/release --prefix stage
           Get-ChildItem stage | Format-Table Name, Length
 
       # Sign the payload BEFORE forging. Forge hashes payload members into the
@@ -160,7 +165,7 @@ jobs:
 
           Docked Console registers a Windows AppBar, so maximized windows stop at its edge instead of covering it. No title bar, no minimize, no close, no taskbar or Alt+Tab entry.
 
-          Requires Windows 11. No .NET runtime needed: the binary is self contained.
+          Requires Windows 11. No runtime to install: it is a single native executable.
 
           Getting out: type ``exit`` in the shell, use the tray icon, or run ``dockedconsole.exe --stop``.
 

@@ -5,7 +5,7 @@
 
 [product]
 name         = "Docked Console"
-version      = "0.1.0"
+version      = "0.2.0"
 publisher    = "Locke Werks"
 description  = "A terminal docked to the edge of the Windows desktop"
 copyright    = "Copyright (C) 2026 Locke Werks"
@@ -55,10 +55,14 @@ name            = "dockedconsole.exe"
 restart_manager = true
 fail            = "Docked Console is running. Undock it from its tray icon, or run dockedconsole.exe --stop, then try again."
 
+# 10 MB, not 1. The payload is a single statically-linked executable well under a
+# megabyte, but this preflight also covers the installer's own extraction and its
+# ARP footprint, and a dialog claiming to need "about 1 MB" reads as a joke on the
+# one occasion it fires against a genuinely full disk.
 [[preflight]]
 type  = "free_disk_space"
-bytes = 157286400
-fail  = "Docked Console needs about 150 MB free on the install volume."
+bytes = 10485760
+fail  = "Docked Console needs about 10 MB free on the install volume."
 
 [[options]]
 id      = "start_menu"
