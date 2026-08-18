@@ -14,6 +14,7 @@
 // this program. If not, see <https://www.gnu.org/licenses/>.
 #include "json.h"
 
+#include <cerrno>
 #include <cwchar>
 #include <cwctype>
 
@@ -198,9 +199,18 @@ bool ParseNumber(Scanner& scanner, Value& out, std::wstring& error)
     // truncate a fractional value rather than carrying a floating-point path
     // that nothing in the config would use.
     wchar_t* end = nullptr;
+    errno = 0;
     const double value = wcstod(text.c_str(), &end);
-    if (end == text.c_str()) {
+    if (end == text.c_str() || *end != L'\0') {
         error = Fail(scanner, L"could not read the number '" + text + L"'");
+        return false;
+    }
+
+    // Casting a double to long long is undefined when the value does not fit,
+    // and "1e999" is four characters a person could plausibly type. Reject it
+    // rather than letting the cast produce whatever the hardware felt like.
+    if (errno == ERANGE || !(value >= -9.2e18 && value <= 9.2e18)) {
+        error = Fail(scanner, L"the number '" + text + L"' is out of range");
         return false;
     }
 
@@ -209,10 +219,22 @@ bool ParseNumber(Scanner& scanner, Value& out, std::wstring& error)
     return true;
 }
 
-bool ParseValue(Scanner& scanner, Value& out, std::wstring& error);
+bool ParseValue(Scanner& scanner, Value& out, std::wstring& error, int depth);
 
-bool ParseArray(Scanner& scanner, Value& out, std::wstring& error)
+/// The config schema is one flat object whose only compound value is an array of
+/// strings, so nesting deeper than this is malformed by definition. The limit is
+/// not a style choice: ParseValue and ParseArray are mutually recursive, so a
+/// file of "{\"a\":[[[[[..." would recurse once per bracket and overflow the
+/// stack, which is a crash on a file the user can edit.
+constexpr int kMaxDepth = 16;
+
+bool ParseArray(Scanner& scanner, Value& out, std::wstring& error, int depth)
 {
+    if (depth >= kMaxDepth) {
+        error = Fail(scanner, L"nested too deeply for this config's schema");
+        return false;
+    }
+
     scanner.Take(); // '['
     out.type = Value::Type::Array;
     out.array.clear();
@@ -224,7 +246,7 @@ bool ParseArray(Scanner& scanner, Value& out, std::wstring& error)
         }
 
         Value element;
-        if (!ParseValue(scanner, element, error)) {
+        if (!ParseValue(scanner, element, error, depth + 1)) {
             return false;
         }
 
@@ -249,8 +271,13 @@ bool ParseArray(Scanner& scanner, Value& out, std::wstring& error)
     }
 }
 
-bool ParseValue(Scanner& scanner, Value& out, std::wstring& error)
+bool ParseValue(Scanner& scanner, Value& out, std::wstring& error, int depth)
 {
+    if (depth >= kMaxDepth) {
+        error = Fail(scanner, L"nested too deeply for this config's schema");
+        return false;
+    }
+
     scanner.SkipTrivia();
     const wchar_t c = scanner.Peek();
 
@@ -260,7 +287,7 @@ bool ParseValue(Scanner& scanner, Value& out, std::wstring& error)
     }
 
     if (c == L'[') {
-        return ParseArray(scanner, out, error);
+        return ParseArray(scanner, out, error, depth + 1);
     }
 
     if (c == L't' || c == L'f' || c == L'n') {
@@ -327,7 +354,7 @@ bool ParseObject(std::wstring_view text, Object& out, std::wstring& error)
         }
 
         Value value;
-        if (!ParseValue(scanner, value, error)) {
+        if (!ParseValue(scanner, value, error, 1)) {
             return false;
         }
         out.emplace_back(std::move(key), std::move(value));

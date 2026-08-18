@@ -123,6 +123,12 @@ void DockWindow::StartTerminal()
     terminal_->on_fault = [this](const std::wstring& message) { tray_.Notify(message); };
     terminal_->on_closed = [this](const std::wstring& failure) { OnTerminalClosed(failure); };
     terminal_->Start();
+
+    // Start() pumps, so a teardown may have run inside it. Everything after this
+    // point has to tolerate that.
+    if (shutting_down_) {
+        return;
+    }
     enforcer_.SetTerminal(terminal_->Hwnd());
 
     // Both the terminal and the shell settle their own geometry after being
@@ -459,6 +465,12 @@ void DockWindow::OnMenuCommand(UINT command)
     case kMenuRestartShell:
         if (terminal_) {
             terminal_->Restart();
+            if (shutting_down_) {
+                break; // Restart pumps, so teardown may have run inside it
+            }
+            // The old HWND is gone. Without this the enforcer keeps filtering
+            // against a destroyed handle and stops recognising its own child.
+            enforcer_.SetTerminal(terminal_->Hwnd());
             fit_ticks_ = 0;
             SetTimer(hwnd_, kTimerFit, 250, nullptr);
         }
@@ -488,7 +500,36 @@ void DockWindow::OnReloadConfig()
         return;
     }
 
+    // Settings that have to be actively undone when they are turned OFF. Reading
+    // the new value and repositioning is not enough for any of these three:
+    // whatever the old value did is still in effect until something reverses it,
+    // and the failure is silent, which is the worst kind.
+    const bool was_pushing_taskbar = cfg_.push_taskbar;
+    const bool was_topmost = cfg_.topmost;
+    const bool was_blocking = cfg_.block_fullscreen;
+
     cfg_ = std::move(fresh);
+
+    if (was_pushing_taskbar && !cfg_.push_taskbar) {
+        // The clip lives on explorer's window, not ours, so it survives until we
+        // clear it.
+        taskbar_.Restore();
+    }
+
+    if (was_topmost && !cfg_.topmost) {
+        SetWindowPos(hwnd_, HWND_NOTOPMOST, 0, 0, 0, 0,
+                     SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOOWNERZORDER);
+    }
+
+    if (was_blocking != cfg_.block_fullscreen) {
+        // The hooks are installed once at startup, so toggling this did nothing
+        // in either direction until now.
+        enforcer_.Stop();
+        enforcer_.Start(hwnd_, cfg_);
+        if (terminal_) {
+            enforcer_.SetTerminal(terminal_->Hwnd());
+        }
+    }
 
     if (background_) {
         DeleteObject(background_);
@@ -574,9 +615,23 @@ void DockWindow::StopChannelShutdown()
     if (stop_quit_event_) {
         SetEvent(stop_quit_event_.Get());
     }
+
     if (stop_thread_) {
-        WaitForSingleObject(stop_thread_.Get(), 2000);
+        if (WaitForSingleObject(stop_thread_.Get(), 2000) != WAIT_OBJECT_0) {
+            // The waiter did not come home. Closing the events it is still
+            // blocked on would hand it two dangling handles, and the handle
+            // values can be reused immediately, so it could wake on an unrelated
+            // object and post into a destroyed window. Leaking three handles in
+            // a process that is exiting anyway is the cheaper mistake.
+            log::Write(L"stop: the wait thread did not exit; leaking its handles "
+                       L"rather than closing them underneath it");
+            (void)stop_thread_.Release();
+            (void)stop_quit_event_.Release();
+            (void)stop_event_.Release();
+            return;
+        }
     }
+
     stop_thread_.Reset();
     stop_quit_event_.Reset();
     stop_event_.Reset();
@@ -630,9 +685,19 @@ void DockWindow::Teardown()
     // WS_CHILD of ours, and a child is destroyed with its parent: letting that
     // happen to a Windows Terminal window living inside a process shared with
     // the user's other terminals would take all of them down.
+    //
+    // Release() but deliberately NOT reset(). Terminal::Start pumps the message
+    // queue while it waits for a cold-starting terminal, so Teardown can be
+    // re-entered from inside a Terminal method that is still on the stack:
+    // tray Exit, --stop, or WM_CLOSE arriving during that window all land here.
+    // Destroying the object then would free it underneath its own Start(), which
+    // resumes and writes to the freed memory. Release() is idempotent and sets a
+    // flag Start() checks after every pump, so it unwinds cleanly instead.
+    //
+    // The object is destroyed with this window, after the message loop has ended
+    // and no Start() can still be running.
     if (terminal_) {
         terminal_->Release();
-        terminal_.reset();
     }
 
     tray_.Destroy();

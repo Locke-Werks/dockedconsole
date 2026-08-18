@@ -130,12 +130,15 @@ void Enforcer::Start(HWND host, const Config& cfg)
 
     host_ = host;
     cfg_ = &cfg;
-    g_instance = this;
 
     if (!cfg.block_fullscreen) {
         log::Write(L"enforce: blockFullscreen is off; not hooking");
         return;
     }
+
+    // Published only once we are actually going to install hooks, so the
+    // callback thunk can never see a half-configured instance.
+    g_instance = this;
 
     // Tight ranges rather than EVENT_MIN..EVENT_MAX. The real cost of this layer
     // is the kernel marshalling events into our queue, not our filter chain, so
@@ -201,6 +204,17 @@ void Enforcer::SetTarget(HMONITOR monitor, const RECT& monitor_bounds, const REC
         clamp_to_.top = strip.bottom;   // dock on top
     } else if (strip.bottom >= monitor_bounds.bottom && strip.top > monitor_bounds.top) {
         clamp_to_.bottom = strip.top;   // dock on the bottom
+    } else {
+        // No edge matched, so there is nothing meaningful to clamp to: leaving
+        // clamp_to_ as the whole monitor would mean "resize every fullscreen
+        // window to fullscreen", which is a busy no-op that still burns an
+        // attempt allowance. Empty it and let Evaluate skip.
+        log::Writef(L"enforce: strip (%d,%d)-(%d,%d) hugs no edge of monitor "
+                    L"(%d,%d)-(%d,%d); fullscreen block idle",
+                    strip.left, strip.top, strip.right, strip.bottom,
+                    monitor_bounds.left, monitor_bounds.top,
+                    monitor_bounds.right, monitor_bounds.bottom);
+        clamp_to_ = RECT{0, 0, 0, 0};
     }
 }
 
@@ -334,9 +348,21 @@ void Enforcer::Evaluate(HWND hwnd, bool bypass_cache)
     if (!LooksFullscreen(hwnd, style)) {
         RememberNotFullscreen(hwnd);
         if (auto it = ledger_.find(hwnd); it != ledger_.end()) {
-            // It left fullscreen honestly, so it earns a fresh allowance.
-            it->second.attempts = 0;
-            it->second.gave_up = false;
+            // Only a window that has stayed out of fullscreen for longer than
+            // the whole attempt window earns a fresh allowance.
+            //
+            // Resetting unconditionally here reads as obviously correct and is
+            // exactly wrong: a SUCCESSFUL clamp is itself what makes the window
+            // stop being fullscreen, so the echo from our own SetWindowPos would
+            // clear the counter every single time. The give-up backstop could
+            // then never reach maxAttempts, and an app that re-asserts its rect
+            // would be fought forever, which is the one outcome this whole
+            // design is meant to avoid.
+            if ((now - it->second.last_attempt) > kAttemptWindowMs) {
+                it->second.attempts = 0;
+                it->second.window_start = 0;
+                it->second.gave_up = false;
+            }
         }
         return;
     }

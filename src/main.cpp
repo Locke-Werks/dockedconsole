@@ -193,6 +193,23 @@ int RunDock(HINSTANCE instance, const std::vector<std::wstring>& args)
     ApplyOverrides(cfg, args);
 
     if (ShouldElevate(cfg)) {
+        // We are the product of a relaunch and still not elevated, so elevating
+        // again would spawn another copy that reaches this same line: an endless
+        // chain of processes and, with elevation "always", an endless chain of
+        // UAC prompts. That happens when runas succeeds but the resulting token
+        // is not actually elevated, which policy can arrange.
+        if (HasFlag(args, kRelaunchFlag)) {
+            log::Write(L"elevation: relaunched but still not elevated; not trying again");
+            MessageBoxW(nullptr,
+                        L"Docked Console tried to restart with administrator rights but "
+                        L"came back without them, so it has stopped rather than trying "
+                        L"again.\n\n"
+                        L"Set \"elevation\" to \"never\" in dockedconsole.json to run "
+                        L"without elevating.",
+                        L"Docked Console", MB_OK | MB_ICONWARNING);
+            return 3;
+        }
+
         // Hand the lock over before spawning, or the elevated copy races the
         // instance that started it and loses.
         instance_lock.Reset();

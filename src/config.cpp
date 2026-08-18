@@ -235,6 +235,15 @@ void Config::Clamp()
 
     const int maximum = (std::max)(80, span / 2);
     width_physical_px = (std::min)((std::max)(width_physical_px, 80), maximum);
+
+    // -1 means "measure the tab strip at runtime". Anything else is a pixel count
+    // subtracted from the terminal's position, so a wild value pushes the
+    // terminal entirely outside the dock and the strip renders empty.
+    if (chrome_trim_px < -1) {
+        chrome_trim_px = -1;
+    } else if (chrome_trim_px > 400) {
+        chrome_trim_px = 400;
+    }
 }
 
 std::wstring Config::FilePath()

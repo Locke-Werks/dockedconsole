@@ -18,6 +18,7 @@
 #include "elevation.h"
 #include "win32.h"
 
+#include <algorithm> // std::find
 #include <vector>
 
 namespace dock {
@@ -77,17 +78,29 @@ BOOL CALLBACK FindDragBar(HWND hwnd, LPARAM param)
 /// is installed its WinEvent callbacks queue up undelivered, because
 /// WINEVENT_OUTOFCONTEXT hooks are dispatched from inside GetMessage. A cold
 /// start could therefore have meant a ten-second enforcement blackout.
-void PumpFor(ULONGLONG ms)
+/// Returns false when the process is quitting and the caller must unwind.
+///
+/// PeekMessage with PM_REMOVE takes WM_QUIT off the queue like any other message,
+/// and DispatchMessage does nothing with it. Dropping it here would mean the
+/// GetMessage loop in DockWindow::Run never sees it and never returns 0, so the
+/// process would hang forever still holding the single-instance mutex, with no
+/// window on screen. Re-post it and stop pumping.
+[[nodiscard]] bool PumpFor(ULONGLONG ms)
 {
     const ULONGLONG deadline = GetTickCount64() + ms;
     MSG msg;
     while (GetTickCount64() < deadline) {
         while (PeekMessageW(&msg, nullptr, 0, 0, PM_REMOVE)) {
+            if (msg.message == WM_QUIT) {
+                PostQuitMessage(static_cast<int>(msg.wParam));
+                return false;
+            }
             TranslateMessage(&msg);
             DispatchMessageW(&msg);
         }
         Sleep(10);
     }
+    return true;
 }
 
 } // namespace
@@ -163,17 +176,39 @@ void Terminal::Start()
 
     if (!Launch()) {
         starting_ = false;
+        // Same reasoning as a locate timeout: an empty dock that reserves desktop
+        // space forever is worse than not starting.
+        if (on_closed) {
+            on_closed(L"Windows Terminal could not be started, so the dock has undocked.");
+        }
         return;
     }
 
     DWORD owner_pid = 0;
     HWND hwnd = LocateWindow(existing, owner_pid);
+
+    // Everything from here down runs after PumpFor has dispatched messages, so
+    // teardown may already have happened underneath us. Release() sets
+    // released_, and DockWindow deliberately keeps this object alive until its
+    // own destructor, so checking the flag is sufficient and safe.
+    if (released_) {
+        log::Write(L"locate: abandoned, the dock is shutting down");
+        starting_ = false;
+        return;
+    }
+
     if (!hwnd) {
         log::Write(L"locate: timed out with no new terminal window");
-        if (on_fault) {
-            on_fault(L"timed out waiting for the terminal window");
-        }
         starting_ = false;
+        // Fatal, not a warning. A balloon used to leave the dock sitting there
+        // reserving 735px of desktop with nothing in it and no way back: the
+        // health check watches a window handle, and there is no handle to watch,
+        // so nothing would ever retry or clean up.
+        if (on_closed) {
+            on_closed(L"The terminal window never appeared, so the dock has undocked.\n\n"
+                      L"Check that Windows Terminal starts on its own, then start the "
+                      L"dock again.");
+        }
         return;
     }
 
@@ -187,6 +222,12 @@ void Terminal::Start()
     // does not.
     WaitUntilReady(hwnd);
 
+    if (released_) {
+        log::Write(L"ready: abandoned, the dock is shutting down");
+        starting_ = false;
+        return;
+    }
+
     terminal_ = hwnd;
     chrome_trim_ = -1;
 
@@ -195,7 +236,13 @@ void Terminal::Start()
     std::wstring error = Embed(hwnd, owner_pid);
     if (!error.empty()) {
         log::Writef(L"embed: first attempt failed, retrying once. %s", error.c_str());
-        PumpFor(600);
+        const bool keep_going = PumpFor(600);
+        if (released_ || !keep_going) {
+            log::Write(L"embed: abandoned between attempts, the dock is shutting down");
+            terminal_ = nullptr;
+            starting_ = false;
+            return;
+        }
         error = Embed(hwnd, owner_pid);
     }
 
@@ -235,7 +282,9 @@ HWND Terminal::LocateWindow(const std::vector<HWND>& existing, DWORD& owner_pid)
             GetWindowThreadProcessId(candidate, &owner_pid);
             return candidate;
         }
-        PumpFor(50);
+        if (!PumpFor(50) || released_) {
+            break;
+        }
     }
 
     owner_pid = 0;
@@ -262,11 +311,13 @@ void Terminal::WaitUntilReady(HWND hwnd)
         if (IsWindowVisible(hwnd) && MeasureChrome(hwnd) > 0) {
             log::Writef(L"ready: terminal settled after %llums", GetTickCount64() - started);
             // The drag bar can appear a frame before the first layout finishes.
-            PumpFor(120);
+            (void)PumpFor(120);
             return;
         }
 
-        PumpFor(50);
+        if (!PumpFor(50) || released_) {
+            return;
+        }
     }
 
     log::Writef(L"ready: TIMED OUT after %llums, visible=%d, dragBar=%dpx. Embedding anyway.",
@@ -494,11 +545,31 @@ void Terminal::Release()
     HWND hwnd = terminal_;
     terminal_ = nullptr;
 
-    if (hwnd && IsWindow(hwnd)) {
-        ShowWindow(hwnd, SW_HIDE);
-        SetParent(hwnd, nullptr);
-        PostMessageW(hwnd, WM_CLOSE, 0, 0);
+    if (!hwnd || !IsWindow(hwnd)) {
+        return;
     }
+
+    SetParent(hwnd, nullptr);
+
+    // Put back what Embed took away before asking it to close.
+    //
+    // WM_CLOSE is a request, and Windows Terminal declines it when a pane has a
+    // running process and "warn before closing" is on. A declined close used to
+    // leave the window hidden, parentless and still carrying WS_CHILD with no
+    // caption: an invisible window the user cannot reach, with their shells
+    // still alive inside it. Restoring the frame means the worst case is a
+    // normal terminal window sitting on the desktop.
+    LONG_PTR style = GetWindowLongPtrW(hwnd, GWL_STYLE);
+    style &= ~static_cast<LONG_PTR>(WS_CHILD);
+    style |= WS_OVERLAPPEDWINDOW | WS_VISIBLE;
+    SetWindowLongPtrW(hwnd, GWL_STYLE, style);
+
+    SetWindowPos(hwnd, nullptr, 0, 0, 0, 0,
+                 SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_FRAMECHANGED
+                     | SWP_NOACTIVATE);
+    ShowWindow(hwnd, SW_SHOWNA);
+
+    PostMessageW(hwnd, WM_CLOSE, 0, 0);
 }
 
 } // namespace dock

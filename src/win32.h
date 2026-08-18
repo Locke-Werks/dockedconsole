@@ -63,6 +63,11 @@ public:
     [[nodiscard]] bool Valid() const { return h_ != nullptr; }
     explicit operator bool() const { return Valid(); }
 
+    /// Gives up ownership without closing. For the rare case where closing would
+    /// be worse than leaking: a handle another thread is still blocked on cannot
+    /// be closed safely, because the value can be reused the moment it is.
+    [[nodiscard]] HANDLE Release() { return std::exchange(h_, nullptr); }
+
 private:
     static HANDLE Normalize(HANDLE h)
     {
