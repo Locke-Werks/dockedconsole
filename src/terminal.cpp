@@ -16,9 +16,10 @@
 
 #include "diag_log.h"
 #include "elevation.h"
+#include "monitors.h"
 #include "win32.h"
 
-#include <algorithm> // std::find
+#include <algorithm> // std::find, std::min, std::max
 #include <vector>
 
 namespace dock {
@@ -263,6 +264,17 @@ void Terminal::Start()
 
 void Terminal::Restart()
 {
+    // Refused while a start is already in flight. Start() pumps, so a tray
+    // "Restart shell" can be dispatched from inside one, and going ahead would
+    // Release() the window that Start() is still in the middle of embedding and
+    // then clear released_ out from under it: the outer Start would resume and
+    // re-embed a window that had already been detached and sent WM_CLOSE, and
+    // the terminal would end up untracked while still a live child of the host.
+    if (starting_) {
+        log::Write(L"restart: a start is already in flight; ignoring");
+        return;
+    }
+
     // Release() sets released_, which is also the flag Start() uses to abandon a
     // launch that a teardown interrupted. Clearing it unconditionally would let
     // a Restart arriving during shutdown revive a torn-down dock, so only a
@@ -341,6 +353,11 @@ std::wstring Terminal::Embed(HWND child, DWORD owner_pid)
 {
     const LONG_PTR original_style = GetWindowLongPtrW(child, GWL_STYLE);
     const LONG_PTR original_ex = GetWindowLongPtrW(child, GWL_EXSTYLE);
+
+    // Remembered for Release, which has to hand a usable window back to the user
+    // if it cannot close it.
+    original_style_ = original_style;
+    original_ex_ = original_ex;
 
     ShowWindow(child, SW_HIDE);
 
@@ -571,14 +588,36 @@ void Terminal::Release()
     // caption: an invisible window the user cannot reach, with their shells
     // still alive inside it. Restoring the frame means the worst case is a
     // normal terminal window sitting on the desktop.
-    LONG_PTR style = GetWindowLongPtrW(hwnd, GWL_STYLE);
-    style &= ~static_cast<LONG_PTR>(WS_CHILD);
-    style |= WS_OVERLAPPEDWINDOW | WS_VISIBLE;
-    SetWindowLongPtrW(hwnd, GWL_STYLE, style);
+    //
+    // The exact captured styles, not an invented WS_OVERLAPPEDWINDOW: this
+    // window belongs to another application and it is not ours to redecorate.
+    if (original_style_ != 0) {
+        SetWindowLongPtrW(hwnd, GWL_STYLE, original_style_ | WS_VISIBLE);
+        SetWindowLongPtrW(hwnd, GWL_EXSTYLE, original_ex_);
+    } else {
+        LONG_PTR style = GetWindowLongPtrW(hwnd, GWL_STYLE);
+        style &= ~static_cast<LONG_PTR>(WS_CHILD);
+        style |= WS_OVERLAPPEDWINDOW | WS_VISIBLE;
+        SetWindowLongPtrW(hwnd, GWL_STYLE, style);
+    }
 
-    SetWindowPos(hwnd, nullptr, 0, 0, 0, 0,
-                 SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_FRAMECHANGED
-                     | SWP_NOACTIVATE);
+    // Reposition, because the geometry is still the dock's. Fit() had put the
+    // window at y = -chromeTrim in the host's CLIENT coordinates so the tab strip
+    // was clipped away; as a top-level window those become SCREEN coordinates and
+    // the caption lands above the top of the display, where it cannot be grabbed.
+    // Put it somewhere the user can actually reach it.
+    RECT work{};
+    const MonitorInfo monitor = ResolveMonitor(cfg_.monitor_device_name);
+    work = monitor.work;
+
+    const int width = (std::min)(1100, (std::max)(640, Width(work) / 2));
+    const int height = (std::min)(800, (std::max)(400, Height(work) / 2));
+
+    SetWindowPos(hwnd, nullptr,
+                 work.left + (Width(work) - width) / 2,
+                 work.top + (Height(work) - height) / 2,
+                 width, height,
+                 SWP_NOZORDER | SWP_FRAMECHANGED | SWP_NOACTIVATE);
     ShowWindow(hwnd, SW_SHOWNA);
 
     PostMessageW(hwnd, WM_CLOSE, 0, 0);

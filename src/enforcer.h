@@ -47,8 +47,18 @@ public:
     void Start(HWND host, const Config& cfg);
     void Stop();
 
-    /// The strip to defend, and the monitor it sits on.
-    void SetTarget(HMONITOR monitor, const RECT& monitor_bounds, const RECT& strip);
+    /// The strip to defend, the monitor it sits on, and which edge it is on.
+    ///
+    /// The edge is passed in rather than inferred from the two rects, because
+    /// inference is ambiguous and wrong in configurations that really occur. A
+    /// top-edge strip trimmed by a vertical taskbar has strip.left > monitor.left
+    /// and strip.right == monitor.right, which is indistinguishable from a
+    /// right-edge dock by geometry alone: reading it that way clamped every
+    /// fullscreen window into a sliver the width of the taskbar. A bottom-edge
+    /// strip sitting above a bottom taskbar matches no branch at all and silently
+    /// disabled the block. The caller already knows the answer from config.
+    void SetTarget(HMONITOR monitor, const RECT& monitor_bounds, const RECT& strip,
+                   DockEdge edge);
 
     /// The reparented terminal, so its own location changes are ignored cheaply.
     void SetTerminal(HWND terminal) { terminal_ = terminal; }

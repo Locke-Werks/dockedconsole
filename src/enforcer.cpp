@@ -185,7 +185,8 @@ void Enforcer::Stop()
     }
 }
 
-void Enforcer::SetTarget(HMONITOR monitor, const RECT& monitor_bounds, const RECT& strip)
+void Enforcer::SetTarget(HMONITOR monitor, const RECT& monitor_bounds, const RECT& strip,
+                         DockEdge edge)
 {
     monitor_ = monitor;
     monitor_bounds_ = monitor_bounds;
@@ -195,21 +196,20 @@ void Enforcer::SetTarget(HMONITOR monitor, const RECT& monitor_bounds, const REC
     // Containing a fullscreen app out of the taskbar's space as well would be
     // more intrusive than asked for, and it would break the reasonable
     // expectation that a fullscreen app covers the taskbar.
+    //
+    // The edge comes from config. See the header for why inferring it from the
+    // rects is not merely inelegant but actively wrong.
     clamp_to_ = monitor_bounds;
-    if (strip.left <= monitor_bounds.left && strip.right < monitor_bounds.right) {
-        clamp_to_.left = strip.right;   // dock on the left
-    } else if (strip.right >= monitor_bounds.right && strip.left > monitor_bounds.left) {
-        clamp_to_.right = strip.left;   // dock on the right
-    } else if (strip.top <= monitor_bounds.top && strip.bottom < monitor_bounds.bottom) {
-        clamp_to_.top = strip.bottom;   // dock on top
-    } else if (strip.bottom >= monitor_bounds.bottom && strip.top > monitor_bounds.top) {
-        clamp_to_.bottom = strip.top;   // dock on the bottom
-    } else {
-        // No edge matched, so there is nothing meaningful to clamp to: leaving
-        // clamp_to_ as the whole monitor would mean "resize every fullscreen
-        // window to fullscreen", which is a busy no-op that still burns an
-        // attempt allowance. Empty it and let Evaluate skip.
-        log::Writef(L"enforce: strip (%d,%d)-(%d,%d) hugs no edge of monitor "
+    switch (edge) {
+    case DockEdge::Left:   clamp_to_.left = strip.right;   break;
+    case DockEdge::Right:  clamp_to_.right = strip.left;   break;
+    case DockEdge::Top:    clamp_to_.top = strip.bottom;   break;
+    case DockEdge::Bottom: clamp_to_.bottom = strip.top;   break;
+    }
+
+    // A strip that swallowed the monitor would leave nothing to clamp into.
+    if (IsEmptyRect(clamp_to_)) {
+        log::Writef(L"enforce: strip (%d,%d)-(%d,%d) leaves no room on monitor "
                     L"(%d,%d)-(%d,%d); fullscreen block idle",
                     strip.left, strip.top, strip.right, strip.bottom,
                     monitor_bounds.left, monitor_bounds.top,

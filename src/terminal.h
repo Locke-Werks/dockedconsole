@@ -84,6 +84,12 @@ private:
     const Config& cfg_;
 
     HWND terminal_ = nullptr;
+
+    /// What the terminal's frame looked like before Embed took it apart, so
+    /// Release can put back exactly that rather than inventing a frame.
+    LONG_PTR original_style_ = 0;
+    LONG_PTR original_ex_ = 0;
+
     int chrome_trim_ = -1;
     ULONGLONG embedded_at_ = 0;
     ULONGLONG last_start_ = 0;

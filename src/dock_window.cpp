@@ -108,6 +108,15 @@ bool DockWindow::Create(HINSTANCE instance)
 
     StartTerminal();
 
+    // StartTerminal pumps the message queue, so a full Teardown and DestroyWindow
+    // may already have happened by the time it returns. Continuing would install
+    // WinEvent hooks and timers that Teardown has just removed and will never
+    // remove again, on a window that no longer exists.
+    if (shutting_down_) {
+        log::Write(L"create: torn down during start-up; not finishing initialisation");
+        return true;
+    }
+
     // Last, so a regression in the new behaviour is unambiguous: everything
     // above this line is the same product the C# version was.
     enforcer_.Start(hwnd_, cfg_);
@@ -356,7 +365,13 @@ LRESULT DockWindow::WndProc(UINT msg, WPARAM wparam, LPARAM lparam)
 
     case WM_ENDSESSION:
         if (wparam) {
+            // The session really is ending. Tear down, then end the message loop
+            // rather than sitting here torn-down but alive: Windows will kill us
+            // shortly either way, but a process that returns from its own loop
+            // releases the single-instance mutex instead of holding it while the
+            // shell waits.
             Teardown();
+            PostQuitMessage(0);
         }
         return 0;
 
@@ -395,7 +410,8 @@ void DockWindow::Reposition()
         SetTimer(hwnd_, kTimerTaskbarVerify, 250, nullptr);
     }
 
-    enforcer_.SetTarget(monitor.handle, monitor.bounds, app_bar_->ReservedRect());
+    enforcer_.SetTarget(monitor.handle, monitor.bounds, app_bar_->ReservedRect(),
+                        cfg_.ParsedEdge());
 
     if (cfg_.topmost) {
         ReassertTopmost();
@@ -491,6 +507,12 @@ void DockWindow::OnMenuCommand(UINT command)
 
 void DockWindow::OnReloadConfig()
 {
+    // A reload dispatched after teardown would re-hook the desktop and re-create
+    // brushes for a window that is gone.
+    if (shutting_down_) {
+        return;
+    }
+
     ConfigStatus status{};
     std::wstring detail;
     Config fresh = Config::Load(status, detail);
