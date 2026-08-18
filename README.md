@@ -211,18 +211,24 @@ Measured on a 2752x2032 display at 125% scaling with a 60px bottom taskbar.
 | Check | Result |
 |---|---|
 | Work area while docked | 2017 x 1972, down from 2752 x 1972 |
-| Taskbar, default | untouched, full 2752 width |
+| Dock window rect | `(2017,0)-(2752,1972)`, stopping at the taskbar |
+| Taskbar, default | `(0,1972)-(2752,2032)`, untouched |
 | Borderless fullscreen window | created 2752 wide, clamped to `(0,0)-(2017,2032)` |
-| With `pushTaskbar: true`, dock rect | `(2017,0)-(2752,2032)`, the full monitor height |
-| With `pushTaskbar: true`, taskbar visible area | `(0,1972)-(2017,2032)`, stops at the dock |
-| With `pushTaskbar: true`, clicks in the clipped strip | fall through to the dock, not to `Shell_TrayWnd` |
+| Fullscreen clamp, all four edges | right `(0,0)-(2017,2032)`, left `(735,0)-(2752,2032)`, top `(0,735)-(2752,2032)`, bottom `(0,0)-(2752,1237)` |
+| Maximized window, `GetWindowRect` | `(-9,-9)-(2026,1981)`, overhanging the monitor on every edge |
+| Maximized window, DWM frame | `(0,0)-(2017,1972)`, stopping at the dock, and correctly left alone |
 | `WM_CLOSE`, `SC_CLOSE`, `SC_MINIMIZE`, `SC_MAXIMIZE`, `SC_MOVE` | all survived |
 | `WS_EX_TOOLWINDOW` set, `WS_EX_APPWINDOW` clear | not in Alt+Tab, not in the taskbar |
 | Typing `exit` | dock exits, work area restored, no orphaned shells |
 | `--stop` | work area restored, any taskbar clip released, other terminal windows untouched |
+| `--stop` during a cold start, at 6 points | no crash, no leaked strip, no leaked clip |
+| 12 malformed configs, incl. 500 nested brackets and `1e999` | all rejected, file left on disk, defaults used |
 | Enforcer CPU, idle | 0 ms over 5 s |
 | Enforcer CPU, 2000 window moves in 1.5 s | 15.6 ms, about 1% of one core |
-| Binary | 325 KB, imports only Windows system DLLs |
+| With `pushTaskbar: true`, dock rect | `(2017,0)-(2752,2032)`, the full monitor height |
+| With `pushTaskbar: true`, taskbar visible area | `(0,1972)-(2017,2032)`, stops at the dock |
+| With `pushTaskbar: true`, clicks in the clipped strip | fall through to the dock, not to `Shell_TrayWnd` |
+| Binary | 323 KB, imports only Windows system DLLs |
 
 ## License
 
