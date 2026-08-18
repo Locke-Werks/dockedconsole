@@ -46,16 +46,32 @@ jobs:
       # Static CRT, so the binary must not import a VC++ runtime. Catching this
       # here is the difference between a clean install and "the application was
       # unable to start correctly" on a machine without the redistributable.
+      #
+      # Scans the image itself rather than shelling out to dumpbin: locating
+      # dumpbin means hardcoding a Visual Studio path, and a hardcoded VS year is
+      # exactly what broke this pipeline when the runner image moved to VS 2026.
       - name: Check for a runtime dependency
         shell: pwsh
         run: |
-          $dumpbin = Get-ChildItem "C:\Program Files*\Microsoft Visual Studio\2022\*\VC\Tools\MSVC\*\bin\Hostx64\x64\dumpbin.exe" |
-                     Select-Object -First 1
-          $deps = & $dumpbin /DEPENDENTS stage/dockedconsole.exe
-          $deps
-          if ($deps -match 'VCRUNTIME|MSVCP\d|api-ms-win-crt') {
-            throw "the binary imports the C runtime; the static CRT setting has been lost"
+          $bytes = [System.IO.File]::ReadAllBytes((Resolve-Path "stage/dockedconsole.exe"))
+          $ascii = [System.Text.Encoding]::ASCII.GetString($bytes)
+
+          # Positive control first. If the scan cannot see the imports we know are
+          # there, it would report "no CRT" for any input at all, and a check that
+          # cannot fail is worse than no check.
+          $expected = [regex]::Matches($ascii, '(?i)\b(USER32|KERNEL32|SHELL32|ADVAPI32)\.dll') |
+                      ForEach-Object { $_.Value.ToUpper() } | Sort-Object -Unique
+          "import names visible to the scan: $($expected -join ', ')"
+          if ($expected.Count -lt 4) {
+            throw "the import scan found only $($expected.Count) of the 4 system DLLs this binary certainly imports, so it is not reading the import table"
           }
+
+          $crt = [regex]::Matches($ascii, '(?i)(VCRUNTIME\d*\.dll|MSVCP\d+\.dll|api-ms-win-crt-[a-z0-9-]+\.dll|ucrtbase\.dll)') |
+                 ForEach-Object { $_.Value } | Sort-Object -Unique
+          if ($crt) {
+            throw "the binary imports the C runtime ($($crt -join ', ')); the static CRT setting has been lost"
+          }
+          "no CRT import: statically linked"
 
       # The release job asserts the tag matches both version strings. Checking
       # they match each other on every push means a release never fails on a
