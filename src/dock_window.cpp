@@ -614,20 +614,30 @@ void DockWindow::InstallStopChannel()
         return;
     }
 
-    stop_thread_.Reset(CreateThread(nullptr, 0, StopChannelThread, this, 0, nullptr));
+    // By value, so the thread never touches this object. See StopChannel.
+    auto* channel = new StopChannel{hwnd_, stop_event_.Get(), stop_quit_event_.Get()};
+
+    stop_thread_.Reset(CreateThread(nullptr, 0, StopChannelThread, channel, 0, nullptr));
+    if (!stop_thread_) {
+        delete channel;
+    }
 }
 
 DWORD WINAPI DockWindow::StopChannelThread(LPVOID param)
 {
-    auto* self = static_cast<DockWindow*>(param);
-    const HANDLE waits[2] = {self->stop_event_.Get(), self->stop_quit_event_.Get()};
+    // Owned by this thread from here on. Leaked only on the path where the thread
+    // never runs to completion, which is a process that is exiting anyway.
+    std::unique_ptr<StopChannel> channel(static_cast<StopChannel*>(param));
+
+    const HANDLE waits[2] = {channel->stop, channel->quit};
 
     if (WaitForMultipleObjects(2, waits, FALSE, INFINITE) == WAIT_OBJECT_0) {
         // PostMessage rather than SendMessage: it is the cross-thread-safe one,
         // and a posted message is dispatched by the inner pump loops that
         // TrackPopupMenuEx and MessageBoxW run, so --stop is honoured even with
-        // the tray menu open.
-        PostMessageW(self->hwnd_, WM_APP_STOP_REQUESTED, 0, 0);
+        // the tray menu open. If the window has since been destroyed this simply
+        // fails, which is the point of holding an HWND rather than a pointer.
+        PostMessageW(channel->hwnd, WM_APP_STOP_REQUESTED, 0, 0);
     }
     return 0;
 }

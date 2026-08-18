@@ -79,6 +79,24 @@ BOOL CALLBACK FindDragBar(HWND hwnd, LPARAM param)
 /// is installed its WinEvent callbacks queue up undelivered, because
 /// WINEVENT_OUTOFCONTEXT hooks are dispatched from inside GetMessage. A cold
 /// start could therefore have meant a ten-second enforcement blackout.
+/// Holds a bool true for a scope.
+///
+/// Start() has eight exit paths and clears the flag on the way out of each, which
+/// is eight chances to forget one. Worse, it used to clear the flag BEFORE calling
+/// on_closed, and on_closed puts a modal message box up, which pumps: a health
+/// timer firing inside that box could re-enter Start while the first one was
+/// still unwinding. The flag now covers the whole call including the callback.
+class ScopeFlag {
+public:
+    explicit ScopeFlag(bool& flag) : flag_(flag) { flag_ = true; }
+    ~ScopeFlag() { flag_ = false; }
+    ScopeFlag(const ScopeFlag&) = delete;
+    ScopeFlag& operator=(const ScopeFlag&) = delete;
+
+private:
+    bool& flag_;
+};
+
 /// Returns false when the process is quitting and the caller must unwind.
 ///
 /// PeekMessage with PM_REMOVE takes WM_QUIT off the queue like any other message,
@@ -170,13 +188,12 @@ void Terminal::Start()
     if (starting_ || released_) {
         return;
     }
-    starting_ = true;
+    const ScopeFlag in_start(starting_);
 
     const std::vector<HWND> existing = FindWindowsByClass(kTerminalClass);
     last_start_ = GetTickCount64();
 
     if (!Launch()) {
-        starting_ = false;
         // Same reasoning as a locate timeout: an empty dock that reserves desktop
         // space forever is worse than not starting.
         if (on_closed) {
@@ -194,13 +211,11 @@ void Terminal::Start()
     // own destructor, so checking the flag is sufficient and safe.
     if (released_) {
         log::Write(L"locate: abandoned, the dock is shutting down");
-        starting_ = false;
         return;
     }
 
     if (!hwnd) {
         log::Write(L"locate: timed out with no new terminal window");
-        starting_ = false;
         // Fatal, not a warning. A balloon used to leave the dock sitting there
         // reserving 735px of desktop with nothing in it and no way back: the
         // health check watches a window handle, and there is no handle to watch,
@@ -225,7 +240,6 @@ void Terminal::Start()
 
     if (released_) {
         log::Write(L"ready: abandoned, the dock is shutting down");
-        starting_ = false;
         return;
     }
 
@@ -241,7 +255,6 @@ void Terminal::Start()
         if (released_ || !keep_going) {
             log::Write(L"embed: abandoned between attempts, the dock is shutting down");
             terminal_ = nullptr;
-            starting_ = false;
             return;
         }
         error = Embed(hwnd, owner_pid);
@@ -250,7 +263,6 @@ void Terminal::Start()
     if (!error.empty()) {
         log::Writef(L"embed: FAILED. %s", error.c_str());
         terminal_ = nullptr;
-        starting_ = false;
         if (on_closed) {
             on_closed(error + L"\n\nDetails were written to:\n" + log::Path());
         }
@@ -259,7 +271,6 @@ void Terminal::Start()
 
     log::Writef(L"embed: ok, chromeTrim=%dpx", ChromeTrim());
     embedded_at_ = GetTickCount64();
-    starting_ = false;
 }
 
 void Terminal::Restart()
@@ -578,7 +589,29 @@ void Terminal::Release()
         return;
     }
 
-    SetParent(hwnd, nullptr);
+    // Detach, and VERIFY it. This is the single most consequential call in the
+    // program. The caller destroys the host window immediately after this
+    // returns, and DestroyWindow destroys its children: if the window is still a
+    // WS_CHILD at that moment, the Windows Terminal window goes with it, and that
+    // window usually belongs to a process shared with every other terminal the
+    // user has open. Assuming SetParent worked is not good enough, and its return
+    // value is ambiguous, so ask GetParent.
+    for (int attempt = 0; attempt < 3; ++attempt) {
+        SetParent(hwnd, nullptr);
+        if (GetParent(hwnd) == nullptr) {
+            break;
+        }
+        log::Writef(L"release: SetParent did not take (attempt %d, error %lu)",
+                    attempt + 1, GetLastError());
+        Sleep(30);
+    }
+
+    if (GetParent(hwnd) != nullptr) {
+        // Nothing further we can do from here, but say so loudly: this is the
+        // path on which a user could lose their other terminal windows.
+        log::Write(L"release: FAILED to detach the terminal; it is still a child "
+                   L"and may be destroyed with the dock");
+    }
 
     // Put back what Embed took away before asking it to close.
     //

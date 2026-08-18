@@ -77,6 +77,20 @@ private:
 
     void InstallStopChannel();
     void StopChannelShutdown();
+
+    /// Everything the wait thread needs, by value.
+    ///
+    /// It deliberately holds no pointer to the DockWindow. On the path where the
+    /// thread does not exit in time, teardown leaks its handles and returns, and
+    /// this object outlives the window: dereferencing a DockWindow there would be
+    /// a use-after-free, whereas an HWND is just a number and PostMessage to a
+    /// destroyed window merely fails.
+    struct StopChannel {
+        HWND hwnd = nullptr;
+        HANDLE stop = nullptr;
+        HANDLE quit = nullptr;
+    };
+
     static DWORD WINAPI StopChannelThread(LPVOID param);
 
     /// Begins an orderly shutdown. The one supported way out.
