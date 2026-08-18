@@ -34,17 +34,20 @@ jobs:
           if ($tag -ne $toml)  { throw "tag $tag does not match installer.toml $toml" }
           if ($tag -ne $cmake) { throw "tag $tag does not match cmake/DockVersion.cmake $cmake" }
 
+      # No vcvars: the preset uses the Visual Studio generator, which locates its
+      # own toolset. A plain step on windows-latest has neither cl.exe nor ninja
+      # on PATH.
       - name: Build
         run: |
           cmake --preset release
           cmake --build --preset release
 
       # Static CRT, so an install carries no runtime prerequisite and the payload
-      # is a single file.
+      # is a single file. --config is required for a multi-config generator.
       - name: Stage the payload
         shell: pwsh
         run: |
-          cmake --install build/release --prefix stage
+          cmake --install build/release --config Release --prefix stage
           Get-ChildItem stage | Format-Table Name, Length
 
       # Sign the payload BEFORE forging. Forge hashes payload members into the

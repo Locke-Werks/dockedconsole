@@ -10,10 +10,24 @@ cmake --preset vs        # works from any shell, no vcvars needed
 cmake --build --preset vs
 ```
 
-Three presets. `vs` uses the Visual Studio generator and finds its own toolset,
-so it is the one to use if in doubt. `dev` and `ci` use Ninja and need an x64
-Native Tools prompt. `ci` turns on `/WX`, which is what CI runs, so build it
-before opening a pull request rather than finding out from the runner.
+Four presets. `vs`, `ci` and `release` use the Visual Studio generator, which
+locates its own toolset and therefore works from any shell with no `vcvars` to
+source. `dev` uses Ninja for faster incremental builds and does need an x64
+Native Tools prompt, because Ninja will not find `cl.exe` on its own.
+
+`ci` is what CI runs and turns on `/WX`, so build it before opening a pull
+request rather than finding out from the runner:
+
+```powershell
+cmake --preset ci
+cmake --build --preset ci
+```
+
+The generator choice for `ci` and `release` is not a preference. A GitHub
+`windows-latest` runner has neither `cl.exe` nor `ninja` on `PATH` in a plain
+step, so a Ninja preset fails there with `CMAKE_CXX_COMPILER not set`. The
+Visual Studio generator is multi-config, which is why `cmake --install` on those
+build trees needs `--config`.
 
 The build is x64 only and links the C runtime statically, so the shippable
 artifact is one file of about 325 KB that imports nothing but Windows system

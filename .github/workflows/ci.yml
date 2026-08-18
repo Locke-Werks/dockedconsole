@@ -13,9 +13,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # No setup step. windows-latest ships VS2022, CMake and Ninja, and the
-      # Ninja preset picks up the toolchain from the developer environment the
-      # runner already has on PATH.
+      # No setup step and no vcvars. The preset uses the Visual Studio generator,
+      # which locates its own toolset: a plain `run:` step on windows-latest has
+      # neither cl.exe nor ninja on PATH, so a Ninja preset would fail here with
+      # "CMAKE_CXX_COMPILER not set".
       - name: Configure
         run: cmake --preset ci
 
@@ -24,10 +25,12 @@ jobs:
       - name: Build
         run: cmake --build --preset ci
 
+      # --config is required: the Visual Studio generator is multi-config, so the
+      # install rule cannot infer which one to take.
       - name: Stage
         shell: pwsh
         run: |
-          cmake --install build/ci --prefix stage
+          cmake --install build/ci --config RelWithDebInfo --prefix stage
           $exe = Get-Item stage/dockedconsole.exe
           "staged {0:N0} KB" -f ($exe.Length / 1KB)
           if (-not $exe.Length) { throw "install produced nothing" }

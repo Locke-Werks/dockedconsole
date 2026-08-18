@@ -12,47 +12,49 @@
       }
     },
     {
-      "name": "vs",
-      "displayName": "Visual Studio 2022 x64",
-      "description": "Works from any shell. No vcvars needed. Use this if in doubt.",
+      "name": "vs-base",
+      "hidden": true,
       "inherits": "base",
       "generator": "Visual Studio 17 2022",
       "architecture": "x64"
     },
     {
-      "name": "dev",
-      "displayName": "Ninja debug",
-      "description": "Requires an x64 Native Tools prompt.",
-      "inherits": "base",
-      "generator": "Ninja",
-      "cacheVariables": { "CMAKE_BUILD_TYPE": "Debug" }
+      "name": "vs",
+      "displayName": "Visual Studio 2022 x64",
+      "description": "Works from any shell. No vcvars needed. Use this if in doubt.",
+      "inherits": "vs-base"
     },
     {
       "name": "ci",
-      "displayName": "Ninja release, warnings are errors",
-      "inherits": "base",
-      "generator": "Ninja",
+      "displayName": "CI: warnings are errors",
+      "description": "What CI runs. Visual Studio generator, because a GitHub runner has neither cl.exe nor ninja on PATH in a plain step and this generator finds its own toolset.",
+      "inherits": "vs-base",
       "cacheVariables": {
-        "CMAKE_BUILD_TYPE": "RelWithDebInfo",
         "DOCK_WERROR": "ON",
         "DOCK_HARDENING": "ON"
       }
     },
     {
       "name": "release",
-      "displayName": "Ninja release, the shippable binary",
-      "inherits": "base",
-      "generator": "Ninja",
+      "displayName": "The shippable binary",
+      "inherits": "vs-base",
       "cacheVariables": {
-        "CMAKE_BUILD_TYPE": "Release",
         "DOCK_HARDENING": "ON"
       }
+    },
+    {
+      "name": "dev",
+      "displayName": "Ninja debug",
+      "description": "Faster incremental builds, but Ninja needs cl.exe on PATH: run it from an x64 Native Tools prompt.",
+      "inherits": "base",
+      "generator": "Ninja",
+      "cacheVariables": { "CMAKE_BUILD_TYPE": "Debug" }
     }
   ],
   "buildPresets": [
-    { "name": "vs",      "configurePreset": "vs", "configuration": "Debug" },
-    { "name": "dev",     "configurePreset": "dev" },
-    { "name": "ci",      "configurePreset": "ci" },
-    { "name": "release", "configurePreset": "release" }
+    { "name": "vs", "configurePreset": "vs", "configuration": "Debug" },
+    { "name": "ci", "configurePreset": "ci", "configuration": "RelWithDebInfo" },
+    { "name": "release", "configurePreset": "release", "configuration": "Release" },
+    { "name": "dev", "configurePreset": "dev" }
   ]
 }
