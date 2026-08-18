@@ -263,7 +263,18 @@ void Terminal::Start()
 
 void Terminal::Restart()
 {
+    // Release() sets released_, which is also the flag Start() uses to abandon a
+    // launch that a teardown interrupted. Clearing it unconditionally would let
+    // a Restart arriving during shutdown revive a torn-down dock, so only a
+    // caller that is genuinely still running gets a fresh start.
+    const bool host_alive = host_ && IsWindow(host_);
+
     Release();
+    if (!host_alive) {
+        log::Write(L"restart: the dock is gone; not relaunching");
+        return;
+    }
+
     released_ = false;
     Start();
 }
@@ -311,6 +322,7 @@ void Terminal::WaitUntilReady(HWND hwnd)
         if (IsWindowVisible(hwnd) && MeasureChrome(hwnd) > 0) {
             log::Writef(L"ready: terminal settled after %llums", GetTickCount64() - started);
             // The drag bar can appear a frame before the first layout finishes.
+            // Either way we are done waiting; Start re-checks released_ next.
             (void)PumpFor(120);
             return;
         }
