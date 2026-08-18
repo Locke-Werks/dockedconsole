@@ -243,7 +243,9 @@ void Terminal::Start()
         return;
     }
 
-    terminal_ = hwnd;
+    // terminal_ is deliberately NOT set here. Embed sets it, and only after the
+    // reparent has actually taken, so the handle this class tracks and the window
+    // that is really a child of the host cannot drift apart between attempts.
     chrome_trim_ = -1;
 
     // One retry. If the first attempt lost a race with the terminal's own
@@ -418,6 +420,17 @@ std::wstring Terminal::Embed(HWND child, DWORD owner_pid)
         return L"The terminal window could not be captured, so the dock has nothing to "
                L"show. A terminal window may have been left open.";
     }
+
+    // Record the handle on success, not before the attempt.
+    //
+    // Assigning it earlier and leaving it there is how the tracked handle and the
+    // real parent/child relationship can come apart: anything that nulls
+    // terminal_ between attempts leaves a window that IS a child of the host but
+    // that Release() will not detach, because Release() keys off terminal_. The
+    // host is destroyed on shutdown, and destroying a window destroys its
+    // children, so a desync there costs the user their other terminal windows.
+    // Setting it here means the two can never disagree.
+    terminal_ = child;
 
     SetWindowPos(child, nullptr, 0, 0, 0, 0,
                  SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_FRAMECHANGED);
@@ -596,9 +609,15 @@ void Terminal::Release()
     // window usually belongs to a process shared with every other terminal the
     // user has open. Assuming SetParent worked is not good enough, and its return
     // value is ambiguous, so ask GetParent.
+    // The test is "no longer OUR child", not "has no parent". SetParent(hwnd,
+    // nullptr) reparents to the desktop, and a window that still carries
+    // WS_CHILD reports the desktop from GetParent rather than null, so comparing
+    // against null can never succeed and reports a failure on every clean
+    // teardown. Only being a child of host_ is dangerous, because only host_ is
+    // about to be destroyed.
     for (int attempt = 0; attempt < 3; ++attempt) {
         SetParent(hwnd, nullptr);
-        if (GetParent(hwnd) == nullptr) {
+        if (GetParent(hwnd) != host_) {
             break;
         }
         log::Writef(L"release: SetParent did not take (attempt %d, error %lu)",
@@ -606,7 +625,7 @@ void Terminal::Release()
         Sleep(30);
     }
 
-    if (GetParent(hwnd) != nullptr) {
+    if (GetParent(hwnd) == host_) {
         // Nothing further we can do from here, but say so loudly: this is the
         // path on which a user could lose their other terminal windows.
         log::Write(L"release: FAILED to detach the terminal; it is still a child "

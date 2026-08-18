@@ -479,10 +479,14 @@ void DockWindow::OnMenuCommand(UINT command)
 {
     switch (command) {
     case kMenuRestartShell:
-        if (terminal_) {
+        // Checked BEFORE the call, not after. The menu runs inside a nested modal
+        // loop, so a teardown can already have happened by the time the command
+        // comes back, and restarting a terminal into a dock that is going away
+        // is not something to discover afterwards.
+        if (terminal_ && !shutting_down_) {
             terminal_->Restart();
             if (shutting_down_) {
-                break; // Restart pumps, so teardown may have run inside it
+                break; // Restart pumps too, so re-check on the way out
             }
             // The old HWND is gone. Without this the enforcer keeps filtering
             // against a destroyed handle and stops recognising its own child.
