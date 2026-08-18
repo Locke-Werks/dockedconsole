@@ -34,9 +34,9 @@ jobs:
           if ($tag -ne $toml)  { throw "tag $tag does not match installer.toml $toml" }
           if ($tag -ne $cmake) { throw "tag $tag does not match cmake/DockVersion.cmake $cmake" }
 
-      # No vcvars: the preset uses the Visual Studio generator, which locates its
-      # own toolset. A plain step on windows-latest has neither cl.exe nor ninja
-      # on PATH.
+      # No vcvars, and no pinned generator: CMake picks the newest Visual Studio
+      # on the box, which finds its own toolset. Naming a VS year breaks when the
+      # runner image moves on, which it did.
       - name: Build
         run: |
           cmake --preset release

@@ -13,12 +13,20 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # No setup step and no vcvars. The preset uses the Visual Studio generator,
-      # which locates its own toolset: a plain `run:` step on windows-latest has
-      # neither cl.exe nor ninja on PATH, so a Ninja preset would fail here with
-      # "CMAKE_CXX_COMPILER not set".
+      # No setup step and no vcvars. The preset names no generator, so CMake picks
+      # the newest Visual Studio on the box and that generator finds its own
+      # toolset. A plain step here has neither cl.exe nor ninja on PATH, so a
+      # Ninja preset fails with "CMAKE_CXX_COMPILER not set", and pinning a VS
+      # year fails the day the image moves: "Visual Studio 17 2022" stopped
+      # resolving when windows-latest became windows-2025-vs2026.
       - name: Configure
         run: cmake --preset ci
+
+      - name: Report the toolchain actually used
+        shell: pwsh
+        run: |
+          Select-String -Path build/ci/CMakeCache.txt -Pattern '^CMAKE_GENERATOR:|^CMAKE_CXX_COMPILER:' |
+            ForEach-Object { $_.Line }
 
       # /WX is on in this preset. A new warning stops the line here rather than
       # on somebody's machine.

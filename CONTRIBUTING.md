@@ -10,10 +10,11 @@ cmake --preset vs        # works from any shell, no vcvars needed
 cmake --build --preset vs
 ```
 
-Four presets. `vs`, `ci` and `release` use the Visual Studio generator, which
-locates its own toolset and therefore works from any shell with no `vcvars` to
-source. `dev` uses Ninja for faster incremental builds and does need an x64
-Native Tools prompt, because Ninja will not find `cl.exe` on its own.
+Four presets. `vs`, `ci` and `release` name no generator at all, so CMake picks
+the newest Visual Studio installed and that generator locates its own toolset:
+they work from any shell with no `vcvars` to source, on whatever VS you have.
+`dev` uses Ninja for faster incremental builds and does need an x64 Native Tools
+prompt, because Ninja will not find `cl.exe` on its own.
 
 `ci` is what CI runs and turns on `/WX`, so build it before opening a pull
 request rather than finding out from the runner:
@@ -23,11 +24,18 @@ cmake --preset ci
 cmake --build --preset ci
 ```
 
-The generator choice for `ci` and `release` is not a preference. A GitHub
-`windows-latest` runner has neither `cl.exe` nor `ninja` on `PATH` in a plain
-step, so a Ninja preset fails there with `CMAKE_CXX_COMPILER not set`. The
-Visual Studio generator is multi-config, which is why `cmake --install` on those
-build trees needs `--config`.
+Leaving the generator unset is not laziness, it is the fix for two separate
+failures. A GitHub `windows-latest` runner has neither `cl.exe` nor `ninja` on
+`PATH` in a plain step, so a Ninja preset fails there with `CMAKE_CXX_COMPILER
+not set`. Naming a specific Visual Studio year fails differently and later:
+`Visual Studio 17 2022` stopped resolving the day `windows-latest` became
+`windows-2025-vs2026`, with `could not find any instance of Visual Studio`.
+Letting CMake choose survives both. The architecture is left unset for the same
+reason: VS generators already default to the host platform, and `CMakeLists.txt`
+fails the configure outright if the result is ever not x64.
+
+Whichever VS it picks, the generator is multi-config, which is why
+`cmake --install` on those build trees needs `--config`.
 
 The build is x64 only and links the C runtime statically, so the shippable
 artifact is one file of about 325 KB that imports nothing but Windows system

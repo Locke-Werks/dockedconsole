@@ -12,23 +12,21 @@
       }
     },
     {
-      "name": "vs-base",
+      "name": "msvc",
       "hidden": true,
       "inherits": "base",
-      "generator": "Visual Studio 17 2022",
-      "architecture": "x64"
+      "description": "Deliberately does NOT name a generator. CMake's default on Windows is the newest installed Visual Studio, which finds its own toolset and therefore needs no vcvars in any shell. Pinning a year breaks the moment a machine moves on: naming 'Visual Studio 17 2022' failed on a GitHub runner that had upgraded to VS 2026, with 'could not find any instance of Visual Studio'. The architecture is left unset too, because VS generators already default to the host platform (verified x64), and CMakeLists.txt fails the configure outright if it ever is not."
     },
     {
       "name": "vs",
-      "displayName": "Visual Studio 2022 x64",
+      "displayName": "Visual Studio, whatever is installed",
       "description": "Works from any shell. No vcvars needed. Use this if in doubt.",
-      "inherits": "vs-base"
+      "inherits": "msvc"
     },
     {
       "name": "ci",
       "displayName": "CI: warnings are errors",
-      "description": "What CI runs. Visual Studio generator, because a GitHub runner has neither cl.exe nor ninja on PATH in a plain step and this generator finds its own toolset.",
-      "inherits": "vs-base",
+      "inherits": "msvc",
       "cacheVariables": {
         "DOCK_WERROR": "ON",
         "DOCK_HARDENING": "ON"
@@ -37,7 +35,7 @@
     {
       "name": "release",
       "displayName": "The shippable binary",
-      "inherits": "vs-base",
+      "inherits": "msvc",
       "cacheVariables": {
         "DOCK_HARDENING": "ON"
       }
@@ -45,7 +43,7 @@
     {
       "name": "dev",
       "displayName": "Ninja debug",
-      "description": "Faster incremental builds, but Ninja needs cl.exe on PATH: run it from an x64 Native Tools prompt.",
+      "description": "Faster incremental builds, but Ninja does not find cl.exe on its own: run it from an x64 Native Tools prompt.",
       "inherits": "base",
       "generator": "Ninja",
       "cacheVariables": { "CMAKE_BUILD_TYPE": "Debug" }
