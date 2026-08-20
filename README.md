@@ -88,6 +88,79 @@ dockedconsole.exe --width 900         # try a width without saving it
 dockedconsole.exe --edge left         # try the other side
 ```
 
+### Driving it from the keyboard
+
+The tab strip is clipped out of the dock on purpose, so the tabs are all still
+there and you simply cannot see them. That sounds like a compromise and is nearer
+to the point: a 735px strip is the wrong shape for a mouse and the right shape
+for a stack of panes and a keyboard. What you have is not a one-shell window that
+happens to be narrow. It is a workspace as deep as you care to make it, addressed
+entirely by hand.
+
+None of this is the dock's. These are Windows Terminal's own bindings, checked
+against the defaults it ships in 1.24. The dock installs no keyboard hook and
+intercepts no keys, so anything you have already rebound comes with you.
+
+**Tabs, which you drive blind.**
+
+| Keys | Does |
+|---|---|
+| `Ctrl+Shift+P` | Command palette. The one that matters here: it lists every tab by name, so a tab strip you cannot see costs you nothing |
+| `Ctrl+Tab` / `Ctrl+Shift+Tab` | Next tab, previous tab |
+| `Ctrl+Alt+1` to `Ctrl+Alt+8` | Jump straight to that tab |
+| `Ctrl+Alt+9` | Last tab |
+| `Ctrl+Shift+T` | New tab on the default profile |
+| `Ctrl+Shift+1` to `Ctrl+Shift+9` | New tab on the first through ninth profile |
+| `Ctrl+Shift+D` | Duplicate this tab, same profile and directory |
+
+**Panes, which is where a tall strip earns its keep.** Split once and a build runs
+above a shell. Split again and the logs go under both.
+
+| Keys | Does |
+|---|---|
+| `Alt+Shift+-` | New pane below, same profile |
+| `Alt+Shift++` | New pane to the right, same profile |
+| `Alt+Shift+D` | New pane along the current one's longer side, which in a strip this shape means below |
+| `Alt+←/→/↑/↓` | Move focus between panes |
+| `Ctrl+Alt+←` | Back to the pane you were last in |
+| `Alt+Shift+←/→/↑/↓` | Resize the focused pane |
+| `Ctrl+Shift+W` | Close the pane. Closing the last one closes the terminal, which the dock treats exactly as it treats `exit` |
+
+`Alt+Shift+D` comes from the `settings.json` Windows Terminal writes on first run
+rather than from its built-in defaults. It is there on an ordinary install and
+absent if you started from an empty settings file.
+
+**Scrollback and text.**
+
+| Keys | Does |
+|---|---|
+| `Ctrl+Shift+F` | Find |
+| `Ctrl+Shift+↑` / `Ctrl+Shift+↓` | Scroll a line |
+| `Ctrl+Shift+PgUp` / `Ctrl+Shift+PgDn` | Scroll a page |
+| `Ctrl+Shift+Home` / `Ctrl+Shift+End` | Top, bottom |
+| `Ctrl+Shift+M` | Mark mode, which selects with the keyboard |
+| `Ctrl+Shift+K` | Clear the buffer |
+| `Ctrl+Shift+C` / `Ctrl+Shift+V` | Copy, paste |
+| `Ctrl++` / `Ctrl+-` / `Ctrl+0` | Font size up, down, back to the profile's |
+
+**Two worth binding yourself.** Windows Terminal defines both actions and binds
+neither, and both are better in a dock than in an ordinary window.
+`togglePaneZoom` blows the focused pane up to the whole strip and back, which is
+how you read a wide stack trace in a narrow column without disturbing the layout
+you built. `toggleSplitOrientation` flips the last split without closing
+anything. The actions already exist, so pointing `keybindings` in your
+`settings.json` at their ids is the whole job:
+
+```jsonc
+{ "keys": "alt+shift+z", "id": "Terminal.TogglePaneZoom" },
+{ "keys": "alt+shift+s", "id": "Terminal.ToggleSplitOrientation" }
+```
+
+Two that behave differently in a strip than they look like they will. `Alt+F4`
+closes the terminal, and the terminal closing is what the dock watches, so it
+undocks and goes. `Ctrl+Shift+N` opens an ordinary Windows Terminal window beside
+the dock rather than inside it, because the dock embeds exactly one.
+
 ### Getting out
 
 There is no close button, on purpose. Three ways out:
