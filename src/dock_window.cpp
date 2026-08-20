@@ -266,9 +266,17 @@ LRESULT DockWindow::WndProc(UINT msg, WPARAM wparam, LPARAM lparam)
             return 0;
 
         case kTimerHealth:
-            if (!shutting_down_ && terminal_) {
+            if (shutting_down_) {
+                return 0;
+            }
+            if (terminal_) {
                 terminal_->CheckHealth();
             }
+            // Backstop for a shell flyout that vanished without the hide event
+            // that would have brought us back up. Being stuck below every window
+            // on the desktop is the one failure this feature could cause, so it
+            // gets a second way out that does not depend on a hook.
+            enforcer_.CheckYield();
             return 0;
 
         case kTimerTaskbarVerify: {
@@ -547,9 +555,12 @@ void DockWindow::OnReloadConfig()
                      SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOOWNERZORDER);
     }
 
-    if (was_blocking != cfg_.block_fullscreen) {
+    if (was_blocking != cfg_.block_fullscreen || was_topmost != cfg_.topmost) {
         // The hooks are installed once at startup, so toggling this did nothing
-        // in either direction until now.
+        // in either direction until now. Topmost is in the condition because the
+        // flyout yield is hooked for its sake alone: turning topmost on in a dock
+        // that started with blockFullscreen off would otherwise leave nothing
+        // listening.
         enforcer_.Stop();
         enforcer_.Start(hwnd_, cfg_);
         if (terminal_) {

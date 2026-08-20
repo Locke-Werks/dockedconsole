@@ -56,7 +56,7 @@ and run it. It is signed by Specter Point Intelligence, LLC, which is the parent
 organization, so that publisher name is correct and not a mis-signing.
 
 Nothing else is required. No runtime to chase down: it is a single native
-executable of about 325 KB with the C runtime linked in, and it imports nothing
+executable of about 330 KB with the C runtime linked in, and it imports nothing
 but Windows system libraries.
 
 Or build it yourself:
@@ -132,7 +132,7 @@ your settings.
 
 Windows 11. Windows Terminal (which ships with it). That is the list.
 
-## Four things that are less obvious than they look
+## Five things that are less obvious than they look
 
 **The tab strip is clipped, not disabled.** Windows Terminal draws its tabs inside
 its own client area, so stripping `WS_CAPTION` does exactly nothing to them.
@@ -187,6 +187,24 @@ Terminal at startup and relaunches itself elevated only when that is the case. O
 a machine with no elevated terminal, nothing elevates and nothing prompts. Set it
 to `never` if you would rather be told than helped.
 
+**The notification area's overflow opens in the ordinary z-order band, which
+means a topmost dock hides it.** The panel behind the chevron is not a topmost
+window and never needed to be: it opens *above* the taskbar rather than over it,
+so it had nothing to outrank. A dock standing on that corner of the screen is
+topmost, and nothing in the ordinary band can be above a topmost window. The
+visible half of that is a flyout that never appears. The half that bites is that
+the icons inside it stop taking clicks, because the clicks land on the dock, and
+an app whose only interface is a tray icon is then unreachable.
+
+Raising someone else's window is not the dock's call, so the dock goes down
+instead: while the overflow is open it orders itself directly behind that window,
+which drops it out of the topmost band, and it climbs back when the flyout
+closes. Ordering behind a named window rather than calling `HWND_NOTOPMOST` pins
+the result instead of leaving it to whatever the ordinary band happens to look
+like. The recovery is on the flyout's hide event with a one-second poll behind
+it, because a missed show costs one flyout and a missed hide would cost the dock
+the only thing it does.
+
 ## What it cannot do
 
 **DXGI exclusive fullscreen.** When an app calls
@@ -219,6 +237,9 @@ Measured on a 2752x2032 display at 125% scaling with a 60px bottom taskbar.
 | Maximized window, DWM frame | `(0,0)-(2017,1972)`, stopping at the dock, and correctly left alone |
 | `WM_CLOSE`, `SC_CLOSE`, `SC_MINIMIZE`, `SC_MAXIMIZE`, `SC_MOVE` | all survived |
 | `WS_EX_TOOLWINDOW` set, `WS_EX_APPWINDOW` clear | not in Alt+Tab, not in the taskbar |
+| Notification area overflow rect | `(2292,1729)-(2585,1972)`, entirely inside the dock's strip |
+| Overflow open | dock leaves the topmost band and lands one z-order slot behind the flyout, nothing in between |
+| Overflow closed | dock topmost again, across 8 open/close transitions, no stuck state and no fallback poll needed |
 | Typing `exit` | dock exits, work area restored, no orphaned shells |
 | `--stop` | work area restored, any taskbar clip released, other terminal windows untouched |
 | `--stop` during a cold start, at 6 points | no crash, no leaked strip, no leaked clip |
@@ -228,7 +249,7 @@ Measured on a 2752x2032 display at 125% scaling with a 60px bottom taskbar.
 | With `pushTaskbar: true`, dock rect | `(2017,0)-(2752,2032)`, the full monitor height |
 | With `pushTaskbar: true`, taskbar visible area | `(0,1972)-(2017,2032)`, stops at the dock |
 | With `pushTaskbar: true`, clicks in the clipped strip | fall through to the dock, not to `Shell_TrayWnd` |
-| Binary | 323 KB, imports only Windows system DLLs |
+| Binary | 330 KB, imports only Windows system DLLs |
 
 ## License
 

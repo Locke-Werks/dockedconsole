@@ -23,12 +23,20 @@
 
 namespace dock {
 
-/// Pushes fullscreen windows out of the reserved strip.
+/// Defends the reserved strip, and steps out of it for the shell.
 ///
-/// The AppBar stops MAXIMIZED windows, because the shell subtracts the strip
-/// from the work area and a maximizing window asks the shell where to go. A
-/// fullscreen window does not ask: it sizes itself to the monitor and paints
-/// over everything. The only way to stop that is to notice and move it.
+/// Two jobs, both driven by the same WinEvent hooks.
+///
+/// Pushing fullscreen windows out. The AppBar stops MAXIMIZED windows, because
+/// the shell subtracts the strip from the work area and a maximizing window
+/// asks the shell where to go. A fullscreen window does not ask: it sizes
+/// itself to the monitor and paints over everything. The only way to stop that
+/// is to notice and move it.
+///
+/// Yielding to shell flyouts. A topmost dock is above everything that is not
+/// topmost, including surfaces the shell puts on top of its own taskbar, and
+/// being above them means hiding them. Stepping out of the topmost band while
+/// one is open is the only way down. See kFlyoutClasses.
 ///
 /// Everything here runs on the thread that owns the host window. A
 /// WINEVENT_OUTOFCONTEXT hook is dispatched on the thread that installed it,
@@ -71,6 +79,13 @@ public:
     /// Used on ABN_FULLSCREENAPP, which can arrive before the location change.
     void ScanForeground();
 
+    /// Re-checks the flyout we stepped behind, if any, and comes back up once it
+    /// is gone. Called on the health tick, so a hide event we never received
+    /// cannot leave the dock stranded outside the topmost band. Only ever
+    /// un-yields: missing a SHOW costs one flyout, missing a HIDE would cost the
+    /// dock's whole reason for existing.
+    void CheckYield();
+
 private:
     struct Record {
         DWORD pid = 0;
@@ -87,6 +102,15 @@ private:
                                     DWORD thread_id, DWORD time);
 
     void OnEvent(DWORD event, HWND hwnd, LONG object_id, LONG child_id);
+
+    /// True when `hwnd` is a shell flyout the dock could be standing in front of.
+    /// The caller uses that to stop: a flyout is never a fullscreen app, and on
+    /// the foreground path re-asserting topmost afterwards would undo the yield
+    /// in the same message.
+    bool HandleFlyout(HWND hwnd);
+    void YieldTo(HWND flyout);
+    void Unyield();
+
     void Evaluate(HWND hwnd, bool bypass_cache);
     [[nodiscard]] bool LooksFullscreen(HWND hwnd, LONG_PTR style) const;
     void Clamp(HWND hwnd);
@@ -117,9 +141,19 @@ private:
     };
     CacheSlot cache_[64]{};
 
+    /// The shell flyout we are currently sitting behind, or null. Non-null is
+    /// also what suppresses ReassertTopmost, without which the next foreground
+    /// change would put us straight back over it.
+    HWND yielded_to_ = nullptr;
+
     ULONGLONG last_topmost_ = 0;
     int depth_ = 0;
     bool running_ = false;
+
+    /// Whether the fullscreen clamp is on. Separate from running_, because the
+    /// flyout yield needs hooks of its own and blockFullscreen must not turn it
+    /// off.
+    bool clamping_ = false;
 };
 
 } // namespace dock

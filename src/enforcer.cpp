@@ -74,6 +74,38 @@ bool IsExcludedClass(const std::wstring& name)
     return false;
 }
 
+/// Shell surfaces the dock has to get out from in front of.
+///
+/// The notification area's overflow, the panel behind the chevron, is the one
+/// that matters, and it is worth saying why it needs help when nothing else
+/// does. It is an ordinary window in the ordinary z-order band: explorer never
+/// made it topmost, because it opens ABOVE the taskbar rather than over it, so
+/// it had nothing to outrank. A dock standing on that corner of the screen is
+/// topmost, and nothing in the ordinary band can be above a topmost window.
+/// Raising it is not ours to do, so the only move left is to step down beside
+/// it and go back up when it closes.
+///
+/// The visible half of this is a flyout that never appears. The half that bites
+/// is that the icons in it stop being clickable, because the clicks land on us,
+/// and an app whose only interface is a tray icon is then unreachable.
+///
+/// Compiled in for the same reason as kExcludedClasses: nobody should need to
+/// know these names to get working software.
+constexpr const wchar_t* kFlyoutClasses[] = {
+    L"TopLevelWindowForOverflowXamlIsland", // Windows 11
+    L"NotifyIconOverflowWindow",            // Windows 10
+};
+
+bool IsFlyoutClass(const std::wstring& name)
+{
+    for (const wchar_t* flyout : kFlyoutClasses) {
+        if (name == flyout) {
+            return true;
+        }
+    }
+    return false;
+}
+
 /// The visible frame, which is not what GetWindowRect returns.
 ///
 /// Since Windows 10 a resizable window's rect includes an invisible border of
@@ -130,9 +162,12 @@ void Enforcer::Start(HWND host, const Config& cfg)
 
     host_ = host;
     cfg_ = &cfg;
+    clamping_ = cfg.block_fullscreen;
 
-    if (!cfg.block_fullscreen) {
-        log::Write(L"enforce: blockFullscreen is off; not hooking");
+    // Topmost earns hooks of its own: a dock that is not topmost is not in front
+    // of anything and has nothing to yield.
+    if (!clamping_ && !cfg.topmost) {
+        log::Write(L"enforce: blockFullscreen and topmost are both off; not hooking");
         return;
     }
 
@@ -148,16 +183,27 @@ void Enforcer::Start(HWND host, const Config& cfg)
         DWORD min;
         DWORD max;
     };
-    static constexpr Range kRanges[] = {
+
+    // Appearing, disappearing and taking focus. Both jobs need these, and for
+    // the flyout yield they are the whole story: a flyout opens, is shown, and
+    // is hidden again without ever moving.
+    static constexpr Range kAlways[] = {
         {EVENT_SYSTEM_FOREGROUND, EVENT_SYSTEM_FOREGROUND},
-        {EVENT_SYSTEM_MOVESIZEEND, EVENT_SYSTEM_MOVESIZEEND},
-        {EVENT_SYSTEM_MINIMIZESTART, EVENT_SYSTEM_MINIMIZEEND},
         {EVENT_OBJECT_DESTROY, EVENT_OBJECT_HIDE},
-        {EVENT_OBJECT_LOCATIONCHANGE, EVENT_OBJECT_LOCATIONCHANGE},
         {EVENT_OBJECT_CLOAKED, EVENT_OBJECT_UNCLOAKED},
     };
 
-    for (const Range& range : kRanges) {
+    // Motion, which only the clamp cares about. LOCATIONCHANGE is the most
+    // expensive subscription on the desktop by a wide margin, a dragged window
+    // firing it hundreds of times a second, so it is not taken out unless
+    // something is going to read it.
+    static constexpr Range kWhenClamping[] = {
+        {EVENT_SYSTEM_MOVESIZEEND, EVENT_SYSTEM_MOVESIZEEND},
+        {EVENT_SYSTEM_MINIMIZESTART, EVENT_SYSTEM_MINIMIZEEND},
+        {EVENT_OBJECT_LOCATIONCHANGE, EVENT_OBJECT_LOCATIONCHANGE},
+    };
+
+    auto install = [this](const Range& range) {
         // WINEVENT_SKIPOWNPROCESS filters our own windows in the OS, before the
         // event is ever queued: the cheapest rejection available.
         HWINEVENTHOOK hook = SetWinEventHook(
@@ -166,20 +212,37 @@ void Enforcer::Start(HWND host, const Config& cfg)
         if (hook) {
             hooks_.push_back(hook);
         }
+    };
+
+    for (const Range& range : kAlways) {
+        install(range);
+    }
+    if (clamping_) {
+        for (const Range& range : kWhenClamping) {
+            install(range);
+        }
     }
 
     running_ = !hooks_.empty();
-    log::Writef(L"enforce: %zu hook(s) installed", hooks_.size());
+    log::Writef(L"enforce: %zu hook(s) installed; fullscreen clamp %s, flyout yield %s",
+                hooks_.size(), clamping_ ? L"on" : L"off",
+                cfg.topmost ? L"on" : L"off");
 }
 
 void Enforcer::Stop()
 {
+    // Before the hooks go. Once they are gone the hide event that would have
+    // restored us is never delivered, and the dock stays out of the topmost band
+    // with nothing left running to notice.
+    Unyield();
+
     for (HWINEVENTHOOK hook : hooks_) {
         UnhookWinEvent(hook);
     }
     hooks_.clear();
     ledger_.clear();
     running_ = false;
+    clamping_ = false;
     if (g_instance == this) {
         g_instance = nullptr;
     }
@@ -246,10 +309,19 @@ void Enforcer::OnEvent(DWORD event, HWND hwnd, LONG object_id, LONG child_id)
     case EVENT_OBJECT_HIDE:
     case EVENT_OBJECT_CLOAKED:
     case EVENT_SYSTEM_MINIMIZESTART:
+        if (hwnd == yielded_to_) {
+            Unyield();
+        }
         Forget(hwnd);
         return;
 
     case EVENT_SYSTEM_FOREGROUND:
+        // Ahead of ReassertTopmost, and returning rather than falling through.
+        // A flyout that takes focus arrives here, and re-asserting topmost after
+        // stepping behind it would climb back over it in the same message.
+        if (HandleFlyout(hwnd)) {
+            return;
+        }
         ReassertTopmost();
         Evaluate(hwnd, /*bypass_cache=*/true);
         return;
@@ -259,6 +331,9 @@ void Enforcer::OnEvent(DWORD event, HWND hwnd, LONG object_id, LONG child_id)
     case EVENT_OBJECT_SHOW:
     case EVENT_OBJECT_UNCLOAKED:
         // Rare transitions we must never miss, so they skip the caches.
+        if (HandleFlyout(hwnd)) {
+            return;
+        }
         Evaluate(hwnd, /*bypass_cache=*/true);
         return;
 
@@ -287,7 +362,7 @@ void Enforcer::RememberNotFullscreen(HWND hwnd)
 
 void Enforcer::Evaluate(HWND hwnd, bool bypass_cache)
 {
-    if (!running_ || !monitor_ || IsEmptyRect(clamp_to_)) {
+    if (!running_ || !clamping_ || !monitor_ || IsEmptyRect(clamp_to_)) {
         return;
     }
 
@@ -462,10 +537,87 @@ void Enforcer::ScanForeground()
     }
 }
 
+bool Enforcer::HandleFlyout(HWND hwnd)
+{
+    // Register compares before the syscall. This runs on every foreground change
+    // and every window that appears, and a dock that is not topmost is not in
+    // front of the flyout to begin with, so there is nothing to identify.
+    if (!host_ || !cfg_ || !cfg_->topmost) {
+        return false;
+    }
+
+    if (!IsFlyoutClass(ClassNameOf(hwnd))) {
+        return false;
+    }
+
+    RECT flyout{};
+    if (!GetWindowRect(hwnd, &flyout) || !Intersects(flyout, strip_)) {
+        // The overflow opens at the notification area, so a left-edge or top-edge
+        // dock is nowhere near it and has no reason to give up the band. The rect
+        // is read rather than assumed: the flyout is positioned before it is
+        // shown, so it is already final by the time this runs.
+        return true;
+    }
+
+    YieldTo(hwnd);
+    return true;
+}
+
+void Enforcer::YieldTo(HWND flyout)
+{
+    if (yielded_to_ == flyout) {
+        return; // already sitting behind this one
+    }
+
+    yielded_to_ = flyout;
+
+    // Ordering ourselves after a non-topmost window is documented to take the
+    // topmost style off, and that is the point rather than a side effect: while
+    // we hold WS_EX_TOPMOST there is no z-order that puts us below the flyout.
+    // Naming the flyout instead of passing HWND_NOTOPMOST also pins the result,
+    // rather than leaving it to whatever the ordinary band happens to look like.
+    SetWindowPos(host_, flyout, 0, 0, 0, 0,
+                 SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOOWNERZORDER);
+
+    log::Writef(L"z-order: stepped behind %s until it closes",
+                ClassNameOf(flyout).c_str());
+}
+
+void Enforcer::Unyield()
+{
+    if (!yielded_to_) {
+        return;
+    }
+
+    yielded_to_ = nullptr;
+
+    // Clearing the debounce first. This is a one-shot recovery, not one of the
+    // routine re-asserts the debounce exists to thin out, and losing it would
+    // leave the dock beneath every window it just stepped behind.
+    last_topmost_ = 0;
+    ReassertTopmost();
+}
+
+void Enforcer::CheckYield()
+{
+    if (!yielded_to_) {
+        return;
+    }
+
+    if (!IsWindow(yielded_to_) || !IsWindowVisible(yielded_to_)) {
+        log::Write(L"z-order: flyout closed without a hide event; coming back up");
+        Unyield();
+    }
+}
+
 void Enforcer::ReassertTopmost()
 {
     if (!host_ || !cfg_ || !cfg_->topmost) {
         return;
+    }
+
+    if (yielded_to_) {
+        return; // a shell flyout is open over the strip and outranks us
     }
 
     const ULONGLONG now = GetTickCount64();
