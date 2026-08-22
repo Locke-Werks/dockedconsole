@@ -291,13 +291,25 @@ void CALLBACK Enforcer::EventThunk(HWINEVENTHOOK, DWORD event, HWND hwnd,
     }
 }
 
+bool Enforcer::IsOurs(HWND hwnd) const
+{
+    // A linear scan over at most six handles, on the hottest path in the
+    // program. A set would cost a hash where this costs a register compare.
+    for (HWND own : owned_) {
+        if (own == hwnd) {
+            return true;
+        }
+    }
+    return false;
+}
+
 void Enforcer::OnEvent(DWORD event, HWND hwnd, LONG object_id, LONG child_id)
 {
     // ---- tier 0: register compares, run on every single event ----
     if (object_id != OBJID_WINDOW || child_id != CHILDID_SELF || !hwnd) {
         return; // caret, cursor, scrollbars, per-element changes
     }
-    if (hwnd == host_ || hwnd == terminal_) {
+    if (hwnd == host_ || IsOurs(hwnd)) {
         return;
     }
     if (depth_ > 0) {

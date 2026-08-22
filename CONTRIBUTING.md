@@ -126,8 +126,9 @@ window manager, and a mock of the window manager would only prove the mock works
 Verification is done against a live desktop. If you change window handling,
 re-check the table at the bottom of the README, in particular:
 
-1. Work area shrinks by exactly `widthPhysicalPx` while docked, via
-   `SystemParametersInfo(SPI_GETWORKAREA)` from a PerMonitorV2 thread.
+1. Work area shrinks by exactly `widthPhysicalPx` times the number of columns
+   while docked, via `SystemParametersInfo(SPI_GETWORKAREA)` from a PerMonitorV2
+   thread.
 2. A maximized window's DWM extended frame bounds stop at the dock edge.
 3. `WM_CLOSE`, `SC_CLOSE` and `SC_MINIMIZE` sent to the host all leave it alive.
 4. `--stop` restores the work area and leaves other terminal windows running.
@@ -135,6 +136,10 @@ re-check the table at the bottom of the README, in particular:
    and an ordinary maximized window does not.
 6. The enforcer costs no measurable CPU at idle and stays around 1% of one core
    under a continuous window-drag storm.
+7. Launching the executable a second and third time adds a column each and moves
+   nothing that was already on screen; a fourth is refused with exit code 5.
+   Typing `exit` in a middle column re-tiles the survivors with no seam, and the
+   last column to close takes the dock down and restores the work area.
 
 Cold start and warm start are different code paths in `terminal.cpp`, and
 historically only the cold one was broken. Test both: with no

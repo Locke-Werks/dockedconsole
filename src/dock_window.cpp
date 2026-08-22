@@ -21,6 +21,9 @@
 
 #include <shellapi.h>
 
+#include <algorithm>
+#include <vector>
+
 namespace dock {
 namespace {
 
@@ -32,6 +35,7 @@ DockWindow::DockWindow(Config cfg) : cfg_(std::move(cfg))
 {
     appbar_message_ = RegisterWindowMessageW(L"DockedConsole_AppBarCallback");
     taskbar_created_ = TaskbarCreatedMessage();
+    add_column_message_ = RegisterWindowMessageW(kAddColumnMessageName);
 }
 
 DockWindow::~DockWindow()
@@ -65,6 +69,20 @@ bool DockWindow::Create(HINSTANCE instance)
         return false;
     }
 
+    WNDCLASSEXW column_class{};
+    column_class.cbSize = sizeof(column_class);
+    column_class.lpfnWndProc = ColumnProcThunk;
+    column_class.hInstance = instance;
+    column_class.lpszClassName = kColumnClass;
+    column_class.hCursor = LoadCursorW(nullptr, IDC_ARROW);
+    // Null for the same reason as the host class: WM_ERASEBKGND paints, so a
+    // config reload does not have to swap a class brush and delete the old one.
+    column_class.hbrBackground = nullptr;
+
+    if (!RegisterClassExW(&column_class)) {
+        return false;
+    }
+
     // WS_EX_TOOLWINDOW keeps it out of Alt+Tab. WS_EX_APPWINDOW is simply absent
     // rather than cleared, which is the Win32 equivalent of what the WinForms
     // CreateParams override was doing.
@@ -91,6 +109,11 @@ bool DockWindow::Create(HINSTANCE instance)
     ChangeWindowMessageFilterEx(hwnd_, WM_SETTINGCHANGE, MSGFLT_ALLOW, nullptr);
     ChangeWindowMessageFilterEx(hwnd_, WM_DISPLAYCHANGE, MSGFLT_ALLOW, nullptr);
 
+    // The same deafness, in the direction that matters for columns: an elevated
+    // dock would drop the add-column message a second instance sends from the
+    // user's ordinary token, and the launch would look like it did nothing.
+    ChangeWindowMessageFilterEx(hwnd_, add_column_message_, MSGFLT_ALLOW, nullptr);
+
     log::WriteBanner(cfg_);
 
     app_bar_ = std::make_unique<AppBar>(hwnd_, appbar_message_);
@@ -106,9 +129,15 @@ bool DockWindow::Create(HINSTANCE instance)
 
     ShowWindow(hwnd_, SW_SHOWNA);
 
-    StartTerminal();
+    Column* first = AppendColumn();
+    if (!first) {
+        log::Write(L"column: could not create the first panel; refusing to start");
+        return false;
+    }
+    LayoutColumns();
+    StartColumn(first->id);
 
-    // StartTerminal pumps the message queue, so a full Teardown and DestroyWindow
+    // StartColumn pumps the message queue, so a full Teardown and DestroyWindow
     // may already have happened by the time it returns. Continuing would install
     // WinEvent hooks and timers that Teardown has just removed and will never
     // remove again, on a window that no longer exists.
@@ -126,19 +155,86 @@ bool DockWindow::Create(HINSTANCE instance)
     return true;
 }
 
-void DockWindow::StartTerminal()
+int DockWindow::StripThickness() const
 {
-    terminal_ = std::make_unique<Terminal>(hwnd_, cfg_);
-    terminal_->on_fault = [this](const std::wstring& message) { tray_.Notify(message); };
-    terminal_->on_closed = [this](const std::wstring& failure) { OnTerminalClosed(failure); };
-    terminal_->Start();
+    const int columns = (std::max)(1, ColumnCount());
+    return columns * cfg_.width_physical_px;
+}
 
-    // Start() pumps, so a teardown may have run inside it. Everything after this
-    // point has to tolerate that.
+DockWindow::Column* DockWindow::FindColumn(int id)
+{
+    for (const auto& column : columns_) {
+        if (column->id == id) {
+            return column.get();
+        }
+    }
+    return nullptr;
+}
+
+DockWindow::Column* DockWindow::FindColumnByPanel(HWND panel)
+{
+    for (const auto& column : columns_) {
+        if (column->panel == panel) {
+            return column.get();
+        }
+    }
+    return nullptr;
+}
+
+DockWindow::Column* DockWindow::ActiveColumn()
+{
+    if (Column* column = FindColumn(active_column_id_)) {
+        return column;
+    }
+    return columns_.empty() ? nullptr : columns_.front().get();
+}
+
+DockWindow::Column* DockWindow::AppendColumn()
+{
+    auto column = std::make_unique<Column>();
+    column->id = next_column_id_++;
+
+    // Sized by LayoutColumns a moment later. Created empty rather than at a
+    // guess, so a panel that never gets laid out is invisible instead of a black
+    // rectangle sitting over the column beside it.
+    column->panel = CreateWindowExW(
+        0, kColumnClass, L"", WS_CHILD | WS_VISIBLE | WS_CLIPCHILDREN,
+        0, 0, 0, 0, hwnd_, nullptr, instance_, this);
+
+    if (!column->panel) {
+        log::Writef(L"column: CreateWindowExW failed (%lu)", GetLastError());
+        return nullptr;
+    }
+
+    Column* raw = column.get();
+    columns_.push_back(std::move(column));
+    active_column_id_ = raw->id;
+    PublishOwnedWindows();
+    return raw;
+}
+
+void DockWindow::StartColumn(int id)
+{
+    Column* column = FindColumn(id);
+    if (!column || column->terminal || shutting_down_) {
+        return;
+    }
+
+    column->terminal = std::make_unique<Terminal>(column->panel, cfg_);
+    column->terminal->on_fault = [this](const std::wstring& message) {
+        tray_.Notify(message);
+    };
+    column->terminal->on_closed = [this, id](const std::wstring& failure) {
+        OnColumnTerminalClosed(id, failure);
+    };
+    column->terminal->Start();
+
+    // Start() pumps, so a teardown may have run inside it, and so may the
+    // removal of this very column. Nothing below may reuse `column`.
     if (shutting_down_) {
         return;
     }
-    enforcer_.SetTerminal(terminal_->Hwnd());
+    PublishOwnedWindows();
 
     // Both the terminal and the shell settle their own geometry after being
     // sized, so the fit is re-applied a few times rather than once.
@@ -146,21 +242,284 @@ void DockWindow::StartTerminal()
     SetTimer(hwnd_, kTimerFit, 250, nullptr);
 }
 
-void DockWindow::OnTerminalClosed(const std::wstring& failure)
+LRESULT DockWindow::OnAddColumnRequest()
+{
+    if (shutting_down_) {
+        // The sender falls back to reporting that an instance is already
+        // running, which is true and is about to stop being true.
+        return kAddColumnNotHandled;
+    }
+
+    if (ColumnCount() >= kMaxColumns) {
+        log::Writef(L"column: refused, already at %d", kMaxColumns);
+        tray_.Notify(L"Already at the maximum of three columns.");
+        return kAddColumnAtMax;
+    }
+
+    const MonitorInfo monitor = ResolveMonitor(cfg_.monitor_device_name);
+    const DockEdge edge = cfg_.ParsedEdge();
+    const int span = (edge == DockEdge::Left || edge == DockEdge::Right)
+                         ? Width(monitor.bounds)
+                         : Height(monitor.bounds);
+    const int wanted = (ColumnCount() + 1) * cfg_.width_physical_px;
+
+    if (span - wanted < kMinFreeWorkAreaPx) {
+        log::Writef(L"column: refused, a %d px strip would leave %d px of desktop",
+                    wanted, span - wanted);
+        tray_.Notify(L"No room for another column on this display.");
+        return kAddColumnNoRoom;
+    }
+
+    Column* column = AppendColumn();
+    if (!column) {
+        return kAddColumnNotHandled;
+    }
+
+    // Reposition early-outs while it is already on the stack, and it can be:
+    // this runs on a SendMessage from the process the user has just started, and
+    // a sent message is dispatched inline, including from inside our own
+    // SHAppBarMessage. The timer picks it up once that has unwound.
+    if (repositioning_) {
+        ScheduleReposition();
+    } else {
+        Reposition();
+    }
+
+    // Posted, not called. The sender is blocked in SendMessage until this
+    // returns, and a cold Windows Terminal takes seconds to appear.
+    //
+    // Checked, because a reserved column that never gets its terminal is a strip
+    // of desktop given up for an empty black rectangle, and nothing else would
+    // ever come along to notice.
+    const int id = column->id;
+    if (!PostMessageW(hwnd_, WM_APP_COLUMN_START, static_cast<WPARAM>(id), 0)) {
+        log::Writef(L"column: could not post the start for #%d (%lu); giving the "
+                    L"width back", id, GetLastError());
+        RemoveColumn(id);
+        return kAddColumnNotHandled;
+    }
+
+    log::Writef(L"column: added #%d, now %d of %d", id, ColumnCount(), kMaxColumns);
+    return kAddColumnAdded;
+}
+
+void DockWindow::OnColumnTerminalClosed(int id, const std::wstring& failure)
 {
     if (shutting_down_) {
         return;
     }
 
-    if (!failure.empty()) {
-        // Shown before shutdown rather than as a tray balloon, because the
-        // balloon would be destroyed along with the tray icon a moment later.
-        MessageBoxW(hwnd_, failure.c_str(), L"Docked Console", MB_OK | MB_ICONWARNING);
+    Column* column = FindColumn(id);
+    if (!column) {
+        return;
+    }
+    column->failure = failure;
+
+    // Posted, never handled inline. This arrives from inside the Terminal's own
+    // code, and taking the column apart here would free the object whose call is
+    // still on the stack.
+    PostMessageW(hwnd_, WM_APP_COLUMN_GONE, static_cast<WPARAM>(id), 0);
+}
+
+void DockWindow::OnColumnGone(int id)
+{
+    if (shutting_down_) {
+        return;
     }
 
-    // The shell exited. Typing exit is how you close any other terminal, so it
-    // closes this one too: undock, restore the desktop, quit.
-    RequestShutdown();
+    Column* column = FindColumn(id);
+    if (!column) {
+        return;
+    }
+
+    const std::wstring failure = column->failure;
+
+    if (ColumnCount() <= 1) {
+        if (!failure.empty()) {
+            // Shown before shutdown rather than as a tray balloon, because the
+            // balloon would be destroyed along with the tray icon a moment later.
+            MessageBoxW(hwnd_, failure.c_str(), L"Docked Console",
+                        MB_OK | MB_ICONWARNING);
+        }
+
+        // The last shell exited. Typing exit is how you close any other terminal,
+        // so it closes this one too: undock, restore the desktop, quit.
+        RequestShutdown();
+        return;
+    }
+
+    if (!failure.empty()) {
+        tray_.Notify(failure);
+    }
+    RemoveColumn(id);
+}
+
+void DockWindow::RemoveColumn(int id)
+{
+    auto it = columns_.begin();
+    for (; it != columns_.end(); ++it) {
+        if ((*it)->id == id) {
+            break;
+        }
+    }
+    if (it == columns_.end()) {
+        return;
+    }
+
+    Retired retired;
+    retired.panel = (*it)->panel;
+    retired.terminal = std::move((*it)->terminal);
+
+    // Detached, not destroyed, and for the same reason Teardown gives: Start()
+    // pumps, so this can be reached from inside the very Start() belonging to
+    // this terminal, and freeing it there would free the frame about to resume.
+    // Release() is safe from anywhere; DrainRetiredColumns does the destroying
+    // once nothing is on the stack.
+    if (retired.terminal) {
+        retired.terminal->Release();
+    }
+
+    columns_.erase(it);
+
+    // Hidden now, destroyed later. Out of the layout either way, since
+    // LayoutColumns only knows about columns_.
+    if (retired.panel) {
+        ShowWindow(retired.panel, SW_HIDE);
+    }
+    retired_.push_back(std::move(retired));
+
+    if (!FindColumn(active_column_id_) && !columns_.empty()) {
+        active_column_id_ = columns_.back()->id;
+    }
+
+    PublishOwnedWindows();
+    log::Writef(L"column: removed #%d, %d left", id, ColumnCount());
+
+    // Same reasoning as the add path: Reposition early-outs while it is already
+    // on the stack, so hand it to the timer when it is.
+    if (repositioning_) {
+        ScheduleReposition();
+    } else {
+        Reposition();
+    }
+    FocusActiveColumn();
+}
+
+void DockWindow::DrainRetiredColumns()
+{
+    std::erase_if(retired_, [](Retired& retired) {
+        if (retired.terminal && retired.terminal->Starting()) {
+            return false;
+        }
+        if (retired.panel) {
+            DestroyWindow(retired.panel);
+        }
+        return true;
+    });
+}
+
+void DockWindow::LayoutColumns()
+{
+    if (columns_.empty()) {
+        return;
+    }
+
+    RECT client{};
+    if (!GetClientRect(hwnd_, &client) || IsEmptyRect(client)) {
+        return;
+    }
+
+    const DockEdge edge = cfg_.ParsedEdge();
+    const int count = ColumnCount();
+
+    for (int i = 0; i < count; ++i) {
+        const RECT slot = ColumnSlot(edge, client, i, count);
+        SetWindowPos(columns_[static_cast<size_t>(i)]->panel, nullptr,
+                     slot.left, slot.top, Width(slot), Height(slot),
+                     SWP_NOZORDER | SWP_NOACTIVATE);
+    }
+
+    FitColumns();
+}
+
+void DockWindow::FitColumns()
+{
+    for (const auto& column : columns_) {
+        if (column->terminal) {
+            column->terminal->Fit();
+        }
+    }
+}
+
+void DockWindow::PublishOwnedWindows()
+{
+    std::vector<HWND> owned;
+    owned.reserve(columns_.size() * 2);
+    for (const auto& column : columns_) {
+        owned.push_back(column->panel);
+        if (column->terminal && column->terminal->Hwnd()) {
+            owned.push_back(column->terminal->Hwnd());
+        }
+    }
+    enforcer_.SetOwnedWindows(std::move(owned));
+}
+
+void DockWindow::FocusActiveColumn()
+{
+    // Not while the tray menu is up. Showing that menu requires
+    // SetForegroundWindow on the host, which lands in WM_ACTIVATE, and punting
+    // focus into a terminal from there would dismiss the menu the user just
+    // opened.
+    if (tray_.MenuIsUp()) {
+        return;
+    }
+    if (Column* column = ActiveColumn(); column && column->terminal) {
+        column->terminal->FocusTerminal();
+    }
+}
+
+LRESULT CALLBACK DockWindow::ColumnProcThunk(HWND hwnd, UINT msg, WPARAM w, LPARAM l)
+{
+    if (msg == WM_NCCREATE) {
+        auto* create = reinterpret_cast<CREATESTRUCTW*>(l);
+        SetWindowLongPtrW(hwnd, GWLP_USERDATA,
+                          reinterpret_cast<LONG_PTR>(create->lpCreateParams));
+        return DefWindowProcW(hwnd, msg, w, l);
+    }
+
+    auto* self = reinterpret_cast<DockWindow*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
+    if (!self) {
+        return DefWindowProcW(hwnd, msg, w, l);
+    }
+
+    switch (msg) {
+    case WM_ERASEBKGND: {
+        RECT client{};
+        GetClientRect(hwnd, &client);
+        FillRect(reinterpret_cast<HDC>(w), &client, self->background_);
+        return 1;
+    }
+
+    case WM_PARENTNOTIFY:
+        // Best effort, and treated as such. A click on a child is sent up the
+        // parent chain as WM_PARENTNOTIFY, and it is the only signal we get that
+        // the user chose a column: the terminal belongs to another process, so
+        // its focus is not ours to read. If a terminal build stops sending it,
+        // the active column stays the last one added, which is where a freshly
+        // added column wants focus anyway.
+        if (LOWORD(w) == WM_LBUTTONDOWN || LOWORD(w) == WM_RBUTTONDOWN
+            || LOWORD(w) == WM_MBUTTONDOWN) {
+            if (Column* column = self->FindColumnByPanel(hwnd)) {
+                self->active_column_id_ = column->id;
+            }
+        }
+        break;
+
+    default:
+        break;
+    }
+
+    return DefWindowProcW(hwnd, msg, w, l);
 }
 
 int DockWindow::Run()
@@ -207,6 +566,13 @@ LRESULT DockWindow::WndProc(UINT msg, WPARAM wparam, LPARAM lparam)
         return 0;
     }
 
+    if (msg == add_column_message_) {
+        // Another copy of the executable was started while this one is docked.
+        // The reply travels back out of that process's SendMessage and decides
+        // what, if anything, it puts on screen.
+        return OnAddColumnRequest();
+    }
+
     if (msg == taskbar_created_) {
         // Explorer restarted. Both the tray icon and the AppBar registration
         // lived inside it and are gone.
@@ -226,6 +592,16 @@ LRESULT DockWindow::WndProc(UINT msg, WPARAM wparam, LPARAM lparam)
     case WM_APP_STOP_REQUESTED:
         log::Write(L"stop: requested over the named event");
         RequestShutdown();
+        return 0;
+
+    case WM_APP_COLUMN_START:
+        if (!shutting_down_) {
+            StartColumn(static_cast<int>(wparam));
+        }
+        return 0;
+
+    case WM_APP_COLUMN_GONE:
+        OnColumnGone(static_cast<int>(wparam));
         return 0;
 
     case WM_ERASEBKGND: {
@@ -255,29 +631,47 @@ LRESULT DockWindow::WndProc(UINT msg, WPARAM wparam, LPARAM lparam)
             return 0;
 
         case kTimerFit:
-            if (shutting_down_ || !terminal_) {
+            if (shutting_down_ || columns_.empty()) {
                 KillTimer(hwnd_, kTimerFit);
                 return 0;
             }
-            terminal_->Fit();
+            FitColumns();
             if (++fit_ticks_ >= 6) {
                 KillTimer(hwnd_, kTimerFit);
             }
             return 0;
 
-        case kTimerHealth:
+        case kTimerHealth: {
             if (shutting_down_) {
                 return 0;
             }
-            if (terminal_) {
-                terminal_->CheckHealth();
+            // By id, not by iterator. With onShellExit: relaunch, CheckHealth
+            // starts a replacement terminal, starting one pumps, and a message
+            // dispatched from inside that pump can remove a column out from
+            // under the loop.
+            std::vector<int> ids;
+            ids.reserve(columns_.size());
+            for (const auto& column : columns_) {
+                ids.push_back(column->id);
             }
+            for (const int id : ids) {
+                if (shutting_down_) {
+                    return 0;
+                }
+                Column* column = FindColumn(id);
+                if (column && column->terminal) {
+                    column->terminal->CheckHealth();
+                }
+            }
+            DrainRetiredColumns();
+
             // Backstop for a shell flyout that vanished without the hide event
             // that would have brought us back up. Being stuck below every window
             // on the desktop is the one failure this feature could cause, so it
             // gets a second way out that does not depend on a hook.
             enforcer_.CheckYield();
             return 0;
+        }
 
         case kTimerTaskbarVerify: {
             KillTimer(hwnd_, kTimerTaskbarVerify);
@@ -311,24 +705,18 @@ LRESULT DockWindow::WndProc(UINT msg, WPARAM wparam, LPARAM lparam)
         if (app_bar_) {
             app_bar_->NotifyActivate();
         }
-        // Not while the tray menu is up. Showing that menu requires
-        // SetForegroundWindow on this window, which lands here, and punting
-        // focus into the terminal would dismiss the menu the user just opened.
-        if (LOWORD(wparam) != WA_INACTIVE && terminal_ && !tray_.MenuIsUp()) {
-            terminal_->FocusTerminal();
+        if (LOWORD(wparam) != WA_INACTIVE) {
+            FocusActiveColumn();
         }
         return 0;
 
     case WM_SETFOCUS:
-        if (terminal_ && !tray_.MenuIsUp()) {
-            terminal_->FocusTerminal();
-        }
+        FocusActiveColumn();
         return 0;
 
     case WM_SIZE:
-        if (terminal_) {
-            terminal_->Fit();
-        }
+        // The panels are sized off the client area, so they move with it.
+        LayoutColumns();
         return 0;
 
     case WM_WINDOWPOSCHANGED: {
@@ -407,7 +795,7 @@ void DockWindow::Reposition()
     repositioning_ = true;
 
     const MonitorInfo monitor = ResolveMonitor(cfg_.monitor_device_name);
-    app_bar_->Reposition(cfg_.ParsedEdge(), cfg_.width_physical_px, monitor.bounds,
+    app_bar_->Reposition(cfg_.ParsedEdge(), StripThickness(), monitor.bounds,
                          cfg_.push_taskbar);
 
     if (cfg_.push_taskbar) {
@@ -425,9 +813,7 @@ void DockWindow::Reposition()
         ReassertTopmost();
     }
 
-    if (terminal_) {
-        terminal_->Fit();
-    }
+    LayoutColumns();
 
     repositioning_ = false;
 }
@@ -486,23 +872,27 @@ void DockWindow::OnAppBarNotification(WPARAM notification, LPARAM lparam)
 void DockWindow::OnMenuCommand(UINT command)
 {
     switch (command) {
-    case kMenuRestartShell:
+    case kMenuRestartShell: {
         // Checked BEFORE the call, not after. The menu runs inside a nested modal
         // loop, so a teardown can already have happened by the time the command
         // comes back, and restarting a terminal into a dock that is going away
         // is not something to discover afterwards.
-        if (terminal_ && !shutting_down_) {
-            terminal_->Restart();
-            if (shutting_down_) {
-                break; // Restart pumps too, so re-check on the way out
-            }
-            // The old HWND is gone. Without this the enforcer keeps filtering
-            // against a destroyed handle and stops recognising its own child.
-            enforcer_.SetTerminal(terminal_->Hwnd());
-            fit_ticks_ = 0;
-            SetTimer(hwnd_, kTimerFit, 250, nullptr);
+        Column* column = ActiveColumn();
+        if (!column || !column->terminal || shutting_down_) {
+            break;
         }
+        const int id = column->id;
+        column->terminal->Restart();
+        if (shutting_down_ || !FindColumn(id)) {
+            break; // Restart pumps too, so re-check on the way out
+        }
+        // The old HWND is gone. Without this the enforcer keeps filtering
+        // against a destroyed handle and stops recognising its own children.
+        PublishOwnedWindows();
+        fit_ticks_ = 0;
+        SetTimer(hwnd_, kTimerFit, 250, nullptr);
         break;
+    }
     case kMenuReloadConfig:
         OnReloadConfig();
         break;
@@ -563,9 +953,7 @@ void DockWindow::OnReloadConfig()
         // listening.
         enforcer_.Stop();
         enforcer_.Start(hwnd_, cfg_);
-        if (terminal_) {
-            enforcer_.SetTerminal(terminal_->Hwnd());
-        }
+        PublishOwnedWindows();
     }
 
     if (background_) {
@@ -728,10 +1116,11 @@ void DockWindow::Teardown()
     // rather than twice.
     taskbar_.Restore();
 
-    // The terminal is detached before anything can destroy this window. It is a
-    // WS_CHILD of ours, and a child is destroyed with its parent: letting that
-    // happen to a Windows Terminal window living inside a process shared with
-    // the user's other terminals would take all of them down.
+    // Every terminal is detached before anything can destroy this window. Each
+    // is a WS_CHILD of its column panel, the panels are children of this window,
+    // and a child is destroyed with its parent: letting that happen to a Windows
+    // Terminal window living inside a process shared with the user's other
+    // terminals would take all of them down.
     //
     // Release() but deliberately NOT reset(). Terminal::Start pumps the message
     // queue while it waits for a cold-starting terminal, so Teardown can be
@@ -741,10 +1130,23 @@ void DockWindow::Teardown()
     // resumes and writes to the freed memory. Release() is idempotent and sets a
     // flag Start() checks after every pump, so it unwinds cleanly instead.
     //
-    // The object is destroyed with this window, after the message loop has ended
-    // and no Start() can still be running.
-    if (terminal_) {
-        terminal_->Release();
+    // The objects are destroyed with this window, after the message loop has
+    // ended and no Start() can still be running. That covers the retired list
+    // too, which is why nothing here touches it.
+    for (const auto& column : columns_) {
+        if (column->terminal) {
+            column->terminal->Release();
+        }
+    }
+
+    // The retired ones too. They were released when their column went, but a
+    // release that lost a race with an embed still in flight would leave a
+    // terminal parented to a hidden panel that is about to be destroyed with
+    // this window. Release() is idempotent, so asking twice costs nothing.
+    for (const auto& retired : retired_) {
+        if (retired.terminal) {
+            retired.terminal->Release();
+        }
     }
 
     tray_.Destroy();

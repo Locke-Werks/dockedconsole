@@ -68,8 +68,12 @@ public:
     void SetTarget(HMONITOR monitor, const RECT& monitor_bounds, const RECT& strip,
                    DockEdge edge);
 
-    /// The reparented terminal, so its own location changes are ignored cheaply.
-    void SetTerminal(HWND terminal) { terminal_ = terminal; }
+    /// Every window the dock owns besides the host: the column panels and the
+    /// terminals reparented into them. They are rejected on the first tier, so a
+    /// terminal redrawing itself never reaches a syscall. Correctness does not
+    /// depend on this list, since tier 2 drops all child windows anyway; a stale
+    /// entry costs one GetAncestor call.
+    void SetOwnedWindows(std::vector<HWND> windows) { owned_ = std::move(windows); }
 
     /// Re-asserts topmost. Debounced, so calling it from every notification is
     /// free.
@@ -122,8 +126,10 @@ private:
     [[nodiscard]] bool RecentlyNotFullscreen(HWND hwnd) const;
     void RememberNotFullscreen(HWND hwnd);
 
+    [[nodiscard]] bool IsOurs(HWND hwnd) const;
+
     HWND host_ = nullptr;
-    HWND terminal_ = nullptr;
+    std::vector<HWND> owned_;
     const Config* cfg_ = nullptr;
 
     std::vector<HWINEVENTHOOK> hooks_;

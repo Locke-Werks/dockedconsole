@@ -74,6 +74,37 @@ RECT SubtractStrip(const RECT& monitor, const RECT& strip, DockEdge edge)
     return out;
 }
 
+RECT ColumnSlot(DockEdge edge, const RECT& client, int index, int count)
+{
+    if (count <= 1 || index < 0 || index >= count) {
+        return client;
+    }
+
+    const bool vertical = (edge == DockEdge::Left || edge == DockEdge::Right);
+    const int span = vertical ? Width(client) : Height(client);
+
+    // Offset of the i'th boundary from the low end of the span.
+    const auto boundary = [span, count](int i) {
+        return static_cast<int>(static_cast<long long>(span) * i / count);
+    };
+
+    int low = 0;
+    int high = 0;
+    if (edge == DockEdge::Left || edge == DockEdge::Top) {
+        // Column 0 is at the low end, where the monitor edge is.
+        low = boundary(index);
+        high = boundary(index + 1);
+    } else {
+        low = span - boundary(index + 1);
+        high = span - boundary(index);
+    }
+
+    if (vertical) {
+        return RECT{client.left + low, client.top, client.left + high, client.bottom};
+    }
+    return RECT{client.left, client.top + low, client.right, client.top + high};
+}
+
 AppBar::AppBar(HWND hwnd, UINT callback_message)
     : hwnd_(hwnd), callback_message_(callback_message)
 {

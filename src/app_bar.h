@@ -95,4 +95,17 @@ private:
 /// `monitor` minus the reserved strip. What a fullscreen window gets clamped to.
 [[nodiscard]] RECT SubtractStrip(const RECT& monitor, const RECT& strip, DockEdge edge);
 
+/// The slice of `client` belonging to one column of `count`.
+///
+/// Column 0 is the one against the monitor edge and every column after it is
+/// added inboard, which is the direction the strip itself grows. That is what
+/// keeps the columns already on screen where they were when a new one appears:
+/// only the inboard boundary moves, and the desktop moves with it.
+///
+/// The boundaries are computed from the running total rather than from a slice
+/// width, so `count` slices tile `client` exactly. Dividing first and handing
+/// the remainder to one end leaves a hairline of dock background between two
+/// columns at most widths, which is visible against a terminal.
+[[nodiscard]] RECT ColumnSlot(DockEdge edge, const RECT& client, int index, int count);
+
 } // namespace dock

@@ -1,8 +1,8 @@
 Signed installer. Run it, and the terminal docks to the right edge of the primary display.
 
-Fixed since 0.2.1: the notification area's overflow, the panel behind the taskbar chevron, opened underneath the dock. It is not a topmost window and never needed to be, because it opens above the taskbar rather than over it, so it had nothing to outrank. A topmost dock standing on that corner of the screen covered it outright, and nothing in the ordinary z-order band can rise above a topmost window. The visible half of that was a flyout that never appeared. The half that bit was the clicks meant for its icons landing on the dock instead, which left an app whose only interface is a tray icon unreachable. The dock now steps out of the topmost band while that flyout is open and returns when it closes.
+New in 0.3.0: columns. Running `dockedconsole.exe` while a dock is already up used to put a dialog on screen saying so and exit. It now adds a column instead. The strip grows inboard by another `widthPhysicalPx`, the shell slides the desktop work area over to match, and the column already on screen does not move. Three is the ceiling, and a column is also refused when another one would leave less than 320 physical pixels of desktop. A refusal is reported from the notification area rather than a dialog, and the copy you launched exits with code 5.
 
-The README gained the Windows Terminal keybindings worth knowing in a strip this shape. The tab strip is clipped out of the dock, so tabs are driven from the command palette and from Ctrl+Alt+n, and panes are what a tall narrow window is actually good for.
+Each column is a separate Windows Terminal with its own tabs and panes. Typing `exit` in one closes that column and gives its width back, and the surviving columns close the gap. The last column to close still takes the dock with it, so a single-column dock behaves exactly as it did. The tray icon, `--stop` and the AppBar registration are all still one per dock, not one per column.
 
 Docked Console registers a Windows AppBar, so maximized windows stop at its edge instead of covering it. No title bar, no minimize, no close, no taskbar or Alt+Tab entry.
 
@@ -14,6 +14,6 @@ Off by default, `pushTaskbar` clips the taskbar so it ends at the dock rather th
 
 Requires Windows 11 and the Windows Terminal that ships with it.
 
-Getting out: type `exit` in the shell, use the tray icon, or run `dockedconsole.exe --stop`.
+Getting out: type `exit` in the last shell, use the tray icon, or run `dockedconsole.exe --stop`.
 
 The publisher on the signature is Specter Point Intelligence, LLC, the parent organisation. That is expected.

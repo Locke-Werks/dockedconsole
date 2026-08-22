@@ -79,11 +79,12 @@ void ApplyOverrides(Config& cfg, const std::vector<std::wstring>& args)
 void ShowUsage()
 {
     console::Report(
-        L"dockedconsole.exe            Dock the console and reserve the strip.\r\n"
+        L"dockedconsole.exe            Dock the console and reserve the strip. Run it\r\n"
+        L"                             again while docked to add a column, up to three.\r\n"
         L"dockedconsole.exe --stop     Undock and exit the running instance.\r\n"
         L"dockedconsole.exe --reclaim  Recover desktop space left reserved by a hard kill.\r\n"
         L"\r\n"
-        L"Overrides, not saved to the config file:\r\n"
+        L"Overrides, not saved to the config file, and read only by the first instance:\r\n"
         L"  --width <physical px>\r\n"
         L"  --edge <left|top|right|bottom>\r\n"
         L"\r\n"
@@ -135,6 +136,56 @@ int Reclaim()
     return 0;
 }
 
+/// Asks the dock that is already running for another column.
+///
+/// Exit codes are the useful part, because this process has no console to write
+/// to: 0 added, 5 refused with the reason shown in the notification area, 2 when
+/// the running instance could not be reached at all.
+int RequestColumn()
+{
+    HWND dock = FindWindowW(kWindowClass, kWindowTitle);
+    if (dock) {
+        DWORD_PTR answer = kAddColumnNotHandled;
+
+        // SendMessageTimeout, not SendMessage. The dock could be inside a modal
+        // loop of its own, and a plain SendMessage would hang this process
+        // behind it with nothing on screen to say why.
+        //
+        // The handler on the other side reserves the column and returns; the
+        // terminal is launched after it has answered, so this wait is short even
+        // on a cold start.
+        const LRESULT delivered = SendMessageTimeoutW(
+            dock, RegisterWindowMessageW(kAddColumnMessageName), 0, 0,
+            SMTO_ABORTIFHUNG | SMTO_ERRORONEXIT, 4000, &answer);
+
+        if (delivered != 0) {
+            switch (answer) {
+            case kAddColumnAdded:
+                return 0;
+            case kAddColumnAtMax:
+            case kAddColumnNoRoom:
+                // The running dock has already said so in the notification area,
+                // where a message about a dock belongs. Another dialog here
+                // would be the second time the user is told.
+                return 5;
+            default:
+                // Zero: a build that predates the message, a message UIPI
+                // dropped on the way to an elevated dock, or an instance that is
+                // in the middle of shutting down. Fall through and say so.
+                break;
+            }
+        }
+    }
+
+    MessageBoxW(nullptr,
+                L"Docked Console is already running and did not answer a request for "
+                L"another column.\n\n"
+                L"It is probably shutting down, or is an older build. Try again, or run "
+                L"dockedconsole.exe --stop and start it fresh.",
+                L"Docked Console", MB_OK | MB_ICONINFORMATION);
+    return 2;
+}
+
 enum class InstanceLock { Acquired, AlreadyRunning };
 
 InstanceLock AcquireInstanceLock(Handle& out, bool wait_for_predecessor)
@@ -173,11 +224,9 @@ int RunDock(HINSTANCE instance, const std::vector<std::wstring>& args)
     Handle instance_lock;
     if (AcquireInstanceLock(instance_lock, HasFlag(args, kRelaunchFlag))
         == InstanceLock::AlreadyRunning) {
-        MessageBoxW(nullptr,
-                    L"Docked Console is already running. Use the tray icon, or run "
-                    L"dockedconsole.exe --stop.",
-                    L"Docked Console", MB_OK | MB_ICONINFORMATION);
-        return 2;
+        // Not an error. Starting the dock again is how you ask for another
+        // column, so hand the request over and get out of the way.
+        return RequestColumn();
     }
 
     ConfigStatus status{};

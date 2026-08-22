@@ -5,7 +5,7 @@
 
 [product]
 name         = "Docked Console"
-version      = "0.2.2"
+version      = "0.3.0"
 publisher    = "Locke Werks"
 description  = "A terminal docked to the edge of the Windows desktop"
 copyright    = "Copyright (C) 2026 Locke Werks"

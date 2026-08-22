@@ -64,6 +64,12 @@ public:
 
     [[nodiscard]] HWND Hwnd() const { return terminal_; }
 
+    /// True while Start() is on the stack. Start pumps the message queue, so a
+    /// message dispatched from inside it can decide to throw this object away,
+    /// and destroying it there frees the Start() that is still running. Callers
+    /// that destroy a Terminal on a message have to wait for this to go false.
+    [[nodiscard]] bool Starting() const { return starting_; }
+
     /// Detaches the terminal window and asks it to close.
     ///
     /// Detaching first is not tidiness. A child window is destroyed with its

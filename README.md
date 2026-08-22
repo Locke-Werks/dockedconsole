@@ -79,7 +79,7 @@ Run it. It docks to the right edge at 735 physical pixels and gets out of your w
 forever.
 
 ```powershell
-dockedconsole.exe                     # dock
+dockedconsole.exe                     # dock, or add a column if already docked
 dockedconsole.exe --stop              # undock and exit
 dockedconsole.exe --reclaim           # recover after a hard kill
 dockedconsole.exe --help              # the rest
@@ -87,6 +87,35 @@ dockedconsole.exe --help              # the rest
 dockedconsole.exe --width 900         # try a width without saving it
 dockedconsole.exe --edge left         # try the other side
 ```
+
+### Columns
+
+Run it again while it is docked and you get a second column instead of a
+complaint. The strip grows inboard by another width, the shell slides the desktop
+work area over to match, and the column already on screen does not move. Three is
+the ceiling.
+
+```
+┌───────────────────────────────┬─────────┬─────────┬─────────┐
+│                               │ column  │ column  │ column  │
+│   your desktop, what is       │    3    │    2    │    1    │
+│   left of it                  │         │         │         │
+│                               │  newest │         │  first  │
+└───────────────────────────────┴─────────┴─────────┴─────────┘
+                                 ◄── each run adds one here
+```
+
+Each column is its own terminal, with its own tabs and panes. Typing `exit` in one
+closes that column and gives its width back; the last one to close takes the dock
+with it, which is what a single-column dock has always done.
+
+A column is refused when there are already three, or when another one would leave
+less than 320 physical pixels of desktop. Either way the running dock says so from
+the notification area and the copy you launched exits with code 5. Nothing pops
+up, because a dialog for "you already have three" is worse than the problem.
+
+The overrides above are read by the first instance only. Once a dock is up, it
+owns the geometry, and a later `--width` is ignored.
 
 ### Driving it from the keyboard
 
@@ -159,7 +188,9 @@ anything. The actions already exist, so pointing `keybindings` in your
 Two that behave differently in a strip than they look like they will. `Alt+F4`
 closes the terminal, and the terminal closing is what the dock watches, so it
 undocks and goes. `Ctrl+Shift+N` opens an ordinary Windows Terminal window beside
-the dock rather than inside it, because the dock embeds exactly one.
+the dock rather than inside it. A terminal joins the dock only by being the one it
+launched for a column, so another column is what you want: run `dockedconsole.exe`
+again.
 
 ### Getting out
 
@@ -172,6 +203,9 @@ There is no close button, on purpose. Three ways out:
 All three unregister the AppBar and give you your desktop back. If you kill the
 process outright instead, `--reclaim` puts everything back.
 
+With more than one column up, `exit` closes only the column you typed it in. The
+other two ways out still take the whole dock.
+
 ## Configure
 
 `dockedconsole.json`, in `%LOCALAPPDATA%\DockedConsole\`, or beside the executable
@@ -181,7 +215,7 @@ geometry changes live.
 | Key | Default | What it does |
 |---|---|---|
 | `edge` | `right` | `left`, `top`, `right`, `bottom` |
-| `widthPhysicalPx` | `735` | Strip thickness in **physical** pixels, not scaled by DPI |
+| `widthPhysicalPx` | `735` | Thickness of **one column** in **physical** pixels, not scaled by DPI |
 | `monitorDeviceName` | `null` | e.g. `\\.\DISPLAY2`, or null for primary |
 | `terminalArgs` | `-w new` | wt.exe args. `-p "Profile"` to pick a profile |
 | `chromeTrimPx` | `-1` | `-1` measures the tab strip at runtime |
@@ -313,6 +347,9 @@ Measured on a 2752x2032 display at 125% scaling with a 60px bottom taskbar.
 | Notification area overflow rect | `(2292,1729)-(2585,1972)`, entirely inside the dock's strip |
 | Overflow open | dock leaves the topmost band and lands one z-order slot behind the flyout, nothing in between |
 | Overflow closed | dock topmost again, across 8 open/close transitions, no stuck state and no fallback poll needed |
+| Second, third instance launched | work area 1282 x 1972 then 547 x 1972, columns added inboard, existing ones did not move |
+| Fourth instance launched | refused at the cap, exit code 5, work area unchanged, balloon from the running dock |
+| Typing `exit` in the middle of three columns | that column closed, work area back to 1282 x 1972, survivors re-tiled with no seam |
 | Typing `exit` | dock exits, work area restored, no orphaned shells |
 | `--stop` | work area restored, any taskbar clip released, other terminal windows untouched |
 | `--stop` during a cold start, at 6 points | no crash, no leaked strip, no leaked clip |

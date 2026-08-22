@@ -23,6 +23,20 @@ namespace dock {
 
 enum class DockEdge { Left, Top, Right, Bottom };
 
+/// How many side-by-side columns the strip will hold. Starting the executable
+/// again adds one; the third is the last.
+inline constexpr int kMaxColumns = 3;
+
+/// Physical pixels of desktop that have to survive on the docked axis. A column
+/// that would leave less than this is refused, because a strip that swallows the
+/// screen leaves nowhere to put the windows it displaces and no obvious way back.
+///
+/// An absolute floor rather than a fraction on purpose. Half the display is the
+/// right cap for one column, which is what Config::Clamp applies; applying it to
+/// the total would put the third column out of reach on every display narrow
+/// enough to want one.
+inline constexpr int kMinFreeWorkAreaPx = 320;
+
 enum class ElevationPolicy {
     /// Elevate only when the terminal we would embed is going to be elevated.
     Auto,

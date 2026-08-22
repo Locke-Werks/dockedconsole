@@ -25,6 +25,8 @@
 #include "win32.h" // Handle
 
 #include <memory>
+#include <string>
+#include <vector>
 
 namespace dock {
 
@@ -33,6 +35,13 @@ namespace dock {
 /// It carries no chrome of its own and hosts the reparented console as a child,
 /// so everything the user sees belongs to the console and everything the window
 /// manager sees belongs to this window.
+///
+/// The strip is divided into one to three columns, each a panel window with its
+/// own terminal in it. Starting the executable again while a dock is up adds a
+/// column rather than refusing: the strip grows inboard by one more width, the
+/// shell slides the desktop work area over to match, and the columns already on
+/// screen do not move. A column whose shell exits takes its width back the same
+/// way, and the last one to go takes the dock with it.
 class DockWindow {
 public:
     explicit DockWindow(Config cfg);
@@ -62,13 +71,70 @@ public:
     [[nodiscard]] HWND Hwnd() const { return hwnd_; }
 
 private:
+    /// One column: a panel window, and the terminal reparented into it.
+    ///
+    /// The panel is not decoration. Windows Terminal's tab strip is hidden by
+    /// pushing the terminal up past the top of its parent's client area and
+    /// letting the parent clip it, so every terminal needs a parent whose client
+    /// area is its own column and nothing else.
+    struct Column {
+        int id = 0;
+        HWND panel = nullptr;
+        std::unique_ptr<Terminal> terminal;
+        /// Why the terminal went, if it went badly. Read once, by the handler
+        /// that takes the column down.
+        std::wstring failure;
+    };
+
     static LRESULT CALLBACK WndProcThunk(HWND hwnd, UINT msg, WPARAM w, LPARAM l);
     LRESULT WndProc(UINT msg, WPARAM wparam, LPARAM lparam);
 
+    /// The panels forward almost everything to DefWindowProc. They exist to clip
+    /// and to paint, not to behave.
+    static LRESULT CALLBACK ColumnProcThunk(HWND hwnd, UINT msg, WPARAM w, LPARAM l);
+
     void Reposition();
     void ScheduleReposition();
-    void StartTerminal();
-    void OnTerminalClosed(const std::wstring& failure);
+
+    // -- columns -----------------------------------------------------------
+    [[nodiscard]] int ColumnCount() const { return static_cast<int>(columns_.size()); }
+
+    /// Total thickness of the reserved strip: one width per column.
+    [[nodiscard]] int StripThickness() const;
+
+    /// Answers the message a second instance sends. Reserves the column and
+    /// returns immediately; the terminal is started from the posted follow-up,
+    /// because the caller is blocked in SendMessage and a cold terminal takes
+    /// seconds to appear.
+    [[nodiscard]] LRESULT OnAddColumnRequest();
+
+    /// Appends a column with its panel created but no terminal yet. Null if the
+    /// panel could not be created.
+    [[nodiscard]] Column* AppendColumn();
+
+    void StartColumn(int id);
+    void OnColumnGone(int id);
+    void OnColumnTerminalClosed(int id, const std::wstring& failure);
+    void RemoveColumn(int id);
+
+    /// Moves every panel onto its slice of the client area and re-fits the
+    /// terminal inside it.
+    void LayoutColumns();
+    void FitColumns();
+
+    /// Hands the enforcer the current panel and terminal handles so it keeps
+    /// rejecting our own windows on its cheapest tier.
+    void PublishOwnedWindows();
+
+    /// Destroys what a removed column left behind, once its terminal is no
+    /// longer inside its own Start(). See Teardown for why that matters.
+    void DrainRetiredColumns();
+
+    [[nodiscard]] Column* FindColumn(int id);
+    [[nodiscard]] Column* FindColumnByPanel(HWND panel);
+    [[nodiscard]] Column* ActiveColumn();
+    void FocusActiveColumn();
+
     void OnAppBarNotification(WPARAM notification, LPARAM lparam);
     void OnMenuCommand(UINT command);
     void OnReloadConfig();
@@ -102,9 +168,32 @@ private:
 
     UINT appbar_message_ = 0;
     UINT taskbar_created_ = 0;
+    UINT add_column_message_ = 0;
 
     std::unique_ptr<AppBar> app_bar_;
-    std::unique_ptr<Terminal> terminal_;
+
+    /// Held behind a unique_ptr so a Column's address survives a different
+    /// column being added or removed while this one's terminal is still
+    /// starting, which pumps the message queue and can dispatch either.
+    std::vector<std::unique_ptr<Column>> columns_;
+
+    /// A column that has been taken out of the layout but not yet taken apart.
+    ///
+    /// The panel waits with the terminal rather than being destroyed on the
+    /// spot, because destroying a window destroys its children: if the terminal
+    /// were mid-embed when the column went, its window could still become a
+    /// child of this panel a moment after Release() detached it.
+    struct Retired {
+        std::unique_ptr<Terminal> terminal;
+        HWND panel = nullptr;
+    };
+    std::vector<Retired> retired_;
+
+    int next_column_id_ = 1;
+
+    /// The column the tray's "Restart shell" acts on and the one focus goes to.
+    int active_column_id_ = 0;
+
     TaskbarClaim taskbar_;
     Enforcer enforcer_;
     Tray tray_;
