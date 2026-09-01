@@ -86,7 +86,13 @@ dockedconsole.exe --help              # the rest
 
 dockedconsole.exe --width 900         # try a width without saving it
 dockedconsole.exe --edge left         # try the other side
+
+dockedconsole.exe --pane-dir C:\src\thing --pane-run "claude --effort max"
 ```
+
+`--pane-dir` and `--pane-run` make the first column start as that command in
+that directory rather than as a shell. Like `--width` and `--edge` they are read
+only by the first instance and never saved.
 
 ### Columns
 
@@ -360,10 +366,11 @@ the boundary, because the dock is the process that embedded the window.
 `WM_COPYDATA` is allowed through UIPI explicitly, so the request itself crosses
 levels fine.
 
-Two columns' worth of panes is the cap, `kMaxForeignPanesPerColumn` in
-`src/config.h`. It only ever over-counts: a pane closed by hand is invisible
-from here, because Windows Terminal publishes no pane count anywhere. "Restart
-shell" on the column clears it.
+Three panes per column is the cap, `kMaxForeignPanesPerColumn` in
+`src/config.h`. A column started with `--pane-run` counts its own first pane
+against that, so it takes two more. The count only ever runs high: a pane closed
+by hand is invisible from here, because Windows Terminal publishes no pane count
+anywhere. "Restart shell" on the column clears it.
 
 ## What it cannot do
 

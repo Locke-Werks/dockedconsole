@@ -91,6 +91,8 @@ void ShowUsage()
         L"Overrides, not saved to the config file, and read only by the first instance:\r\n"
         L"  --width <physical px>\r\n"
         L"  --edge <left|top|right|bottom>\r\n"
+        L"  --pane-dir <path>          Start the first column in this directory.\r\n"
+        L"  --pane-run <command line>  Start the first column as this, not a shell.\r\n"
         L"\r\n"
         L"Settings live in dockedconsole.json next to this executable, or in\r\n"
         L"%LOCALAPPDATA%\\DockedConsole when there is none there.\r\n"
