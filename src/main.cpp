@@ -71,6 +71,10 @@ void ApplyOverrides(Config& cfg, const std::vector<std::wstring>& args)
             }
         } else if (EqualsNoCase(args[i], L"--edge")) {
             cfg.edge = args[i + 1];
+        } else if (EqualsNoCase(args[i], L"--pane-dir")) {
+            cfg.initial_pane_cwd = args[i + 1];
+        } else if (EqualsNoCase(args[i], L"--pane-run")) {
+            cfg.initial_pane_command = args[i + 1];
         }
     }
     cfg.Clamp();

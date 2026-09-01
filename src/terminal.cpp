@@ -195,6 +195,12 @@ Terminal::~Terminal()
     Release();
 }
 
+void Terminal::SetInitialCommand(std::wstring cwd, std::wstring command)
+{
+    initial_cwd_ = std::move(cwd);
+    initial_command_ = std::move(command);
+}
+
 bool Terminal::SplitPane(const std::wstring& cwd, const std::wstring& command,
                          std::wstring& error)
 {
@@ -278,6 +284,16 @@ bool Terminal::Launch()
     // Passing a literal or a c_str() is undefined behaviour and corrupts memory
     // on some paths rather than failing cleanly.
     std::wstring command_line = L"\"" + wt + L"\" " + cfg_.TerminalArgsFor(window_name_);
+
+    // A column asked to be something other than a shell. Same shape as a split:
+    // -d for the directory, then everything after -- is the command, with its
+    // semicolons escaped so wt does not read one as its own separator.
+    if (!initial_command_.empty()) {
+        if (!initial_cwd_.empty()) {
+            command_line += L" -d " + QuoteArg(initial_cwd_);
+        }
+        command_line += L" -- " + EscapeSeparators(initial_command_);
+    }
 
     STARTUPINFOW startup{};
     startup.cb = sizeof(startup);

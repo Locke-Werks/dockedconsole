@@ -27,13 +27,16 @@ enum class DockEdge { Left, Top, Right, Bottom };
 /// again adds one; the third is the last.
 inline constexpr int kMaxColumns = 3;
 
-/// Panes another program may add to one column, on top of the shell this dock
-/// started there.
+/// Panes another program may put in one column.
 ///
-/// Windows Terminal halves the focused pane, so two of these leave a half and
-/// two quarters rather than three thirds. Three panes in a 735px strip is
-/// already tight; this is the number to change after living with it.
-inline constexpr int kMaxForeignPanesPerColumn = 2;
+/// Counts the column's own terminal when that program asked for it too, which
+/// it does whenever it started the dock or the column: three here means the
+/// requested thing plus two splits, and no shell nobody asked for.
+///
+/// Windows Terminal halves the focused pane, so two splits leave a half and two
+/// quarters rather than three thirds. Three panes in a 735px strip is already
+/// tight; this is the number to change after living with it.
+inline constexpr int kMaxForeignPanesPerColumn = 3;
 
 /// Physical pixels of desktop that have to survive on the docked axis. A column
 /// that would leave less than this is refused, because a strip that swallows the
@@ -100,6 +103,15 @@ struct Config {
     /// A name and "new" mean the same thing to Windows Terminal, a fresh
     /// window, except that a name can be found again afterwards.
     bool name_windows = true;
+
+    /// What a column's own terminal should run instead of a plain shell.
+    ///
+    /// One-shot and never persisted, like the --width override: set from
+    /// --pane-dir and --pane-run so a program starting the dock can have the
+    /// very first column be the thing it wanted, rather than a shell it did not
+    /// ask for with its pane underneath.
+    std::wstring initial_pane_cwd;
+    std::wstring initial_pane_command;
 
     /// Profile for panes added to a column later, empty for the default.
     ///

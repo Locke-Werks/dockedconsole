@@ -93,6 +93,11 @@ private:
         /// everyone else, because Windows Terminal publishes no pane count.
         /// "Restart shell" on the column is the way back.
         int foreign_panes = 0;
+
+        /// What this column's own terminal should run instead of a shell. Set
+        /// before its terminal starts, and only then.
+        std::wstring initial_cwd;
+        std::wstring initial_command;
         /// Why the terminal went, if it went badly. Read once, by the handler
         /// that takes the column down.
         std::wstring failure;

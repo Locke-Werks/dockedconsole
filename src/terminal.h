@@ -67,6 +67,12 @@ public:
     [[nodiscard]] bool SplitPane(const std::wstring& cwd, const std::wstring& command,
                                  std::wstring& error);
 
+    /// Run this instead of a plain shell when the terminal starts.
+    ///
+    /// Set before Start(), and kept across a Restart so a relaunched column
+    /// comes back as what it was rather than reverting to a shell.
+    void SetInitialCommand(std::wstring cwd, std::wstring command);
+
     /// Launches and embeds. Safe to call again after the terminal has gone.
     void Start();
 
@@ -109,6 +115,8 @@ private:
     HWND host_;
     const Config& cfg_;
     std::wstring window_name_;
+    std::wstring initial_cwd_;
+    std::wstring initial_command_;
 
     HWND terminal_ = nullptr;
 

@@ -150,6 +150,19 @@ bool DockWindow::Create(HINSTANCE instance)
         log::Write(L"column: could not create the first panel; refusing to start");
         return false;
     }
+
+    // Whoever started us may have said what this column is for. Without this the
+    // first column is always a shell, and a program that started the dock to run
+    // one thing gets that thing in a pane underneath a shell it did not ask for.
+    first->initial_cwd = cfg_.initial_pane_cwd;
+    first->initial_command = cfg_.initial_pane_command;
+
+    // Counted, because that terminal is one of the caller's panes rather than
+    // the shell this dock would otherwise have put there. Without this the
+    // column looks empty and takes a full set of panes on top of the one it is
+    // already running.
+    if (!first->initial_command.empty())
+        first->foreign_panes = 1;
     LayoutColumns();
     StartColumn(first->id);
 
@@ -245,6 +258,8 @@ void DockWindow::StartColumn(int id)
     }
 
     column->terminal = std::make_unique<Terminal>(column->panel, cfg_, column->window_name);
+    if (!column->initial_command.empty())
+        column->terminal->SetInitialCommand(column->initial_cwd, column->initial_command);
     column->terminal->on_fault = [this](const std::wstring& message) {
         tray_.Notify(message);
     };
@@ -361,6 +376,15 @@ LRESULT DockWindow::OnSplitRequest(const COPYDATASTRUCT& data)
         }
         target = columns_.back().get();
         answer = kSplitNewColumn;
+
+        // The column exists but its terminal has only been posted, not started,
+        // so this is still in time to make that terminal the requested thing
+        // rather than a shell with the request in a pane below it.
+        target->initial_cwd = cwd;
+        target->initial_command = command;
+        ++target->foreign_panes;
+        log::Writef(L"split: #%d will start as the requested command", target->id);
+        return answer;
     }
 
     ++target->foreign_panes;
