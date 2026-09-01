@@ -161,7 +161,7 @@ bool DockWindow::Create(HINSTANCE instance)
     // the shell this dock would otherwise have put there. Without this the
     // column looks empty and takes a full set of panes on top of the one it is
     // already running.
-    if (!first->initial_command.empty())
+    if (!first->initial_command.empty() || !first->initial_cwd.empty())
         first->foreign_panes = 1;
     LayoutColumns();
     StartColumn(first->id);
@@ -258,7 +258,7 @@ void DockWindow::StartColumn(int id)
     }
 
     column->terminal = std::make_unique<Terminal>(column->panel, cfg_, column->window_name);
-    if (!column->initial_command.empty())
+    if (!column->initial_command.empty() || !column->initial_cwd.empty())
         column->terminal->SetInitialCommand(column->initial_cwd, column->initial_command);
     column->terminal->on_fault = [this](const std::wstring& message) {
         tray_.Notify(message);
@@ -337,7 +337,10 @@ LRESULT DockWindow::OnSplitRequest(const COPYDATASTRUCT& data)
     const std::wstring command(reinterpret_cast<const wchar_t*>(base + header.cmd_offset),
                                header.cmd_length);
 
-    if (command.empty()) {
+    // An empty command asks for a pane running the profile's own shell, which
+    // is a legitimate request as long as it says where to open it. One carrying
+    // neither a command nor a directory asks for nothing at all.
+    if (command.empty() && cwd.empty()) {
         return kSplitRejected;
     }
 

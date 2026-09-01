@@ -237,7 +237,13 @@ bool Terminal::SplitPane(const std::wstring& cwd, const std::wstring& command,
     // Everything after -- is the command. Semicolons have to go: wt reads one
     // as its own subcommand separator and would cut the command line in half
     // before the shell ever saw it.
-    line += L" -- " + EscapeSeparators(command);
+    //
+    // No command means a pane running the profile's own shell, so the -- is
+    // left off entirely. Passing a bare -- with nothing after it is an error,
+    // not an empty command.
+    if (!command.empty()) {
+        line += L" -- " + EscapeSeparators(command);
+    }
 
     // CreateProcessW writes into lpCommandLine, so it must be a writable buffer.
     std::wstring mutable_line = line;
@@ -285,13 +291,18 @@ bool Terminal::Launch()
     // on some paths rather than failing cleanly.
     std::wstring command_line = L"\"" + wt + L"\" " + cfg_.TerminalArgsFor(window_name_);
 
-    // A column asked to be something other than a shell. Same shape as a split:
-    // -d for the directory, then everything after -- is the command, with its
-    // semicolons escaped so wt does not read one as its own separator.
+    // A column asked to start somewhere, or to be something other than a shell.
+    // Same shape as a split: -d for the directory, then everything after -- is
+    // the command, with its semicolons escaped so wt does not read one as its
+    // own separator.
+    //
+    // The two are independent. A directory with no command is an ordinary shell
+    // that happens to start in the right place, and gating -d behind the command
+    // would silently drop the directory for exactly that case.
+    if (!initial_cwd_.empty()) {
+        command_line += L" -d " + QuoteArg(initial_cwd_);
+    }
     if (!initial_command_.empty()) {
-        if (!initial_cwd_.empty()) {
-            command_line += L" -d " + QuoteArg(initial_cwd_);
-        }
         command_line += L" -- " + EscapeSeparators(initial_command_);
     }
 

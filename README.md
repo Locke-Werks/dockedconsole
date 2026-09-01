@@ -91,8 +91,9 @@ dockedconsole.exe --pane-dir C:\src\thing --pane-run "claude --effort max"
 ```
 
 `--pane-dir` and `--pane-run` make the first column start as that command in
-that directory rather than as a shell. Like `--width` and `--edge` they are read
-only by the first instance and never saved.
+that directory rather than as a shell. They are independent: a directory on its
+own is an ordinary shell that opens in the right place. Like `--width` and
+`--edge` they are read only by the first instance and never saved.
 
 ### Columns
 
@@ -342,6 +343,10 @@ SendMessageTimeoutW(dock, WM_COPYDATA, 0, reinterpret_cast<LPARAM>(&data),
 The block is `SplitRequest` from `src/ids.h` followed by two NUL-terminated wide
 strings. Offsets are bytes from the start of the block, lengths are in WCHARs,
 and every one of them is checked against `cbData` before a character is read.
+
+The two strings are independent. A command with no directory is that command
+wherever the profile starts; a directory with no command is an ordinary shell
+opened there. A request carrying neither is refused, since it asks for nothing.
 
 The answer is one of `SplitResult`, and the numbers are contract: add to the
 end, never renumber.
