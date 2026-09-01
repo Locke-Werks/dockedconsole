@@ -50,6 +50,18 @@ DockWindow::~DockWindow()
 bool DockWindow::Create(HINSTANCE instance)
 {
     instance_ = instance;
+
+    // A token for this run of the dock, mixed from the process id and the boot
+    // clock so two docks started in the same second still differ. It is what
+    // stops a Windows Terminal window left over from an earlier run answering
+    // to a name this run hands out.
+    {
+        wchar_t token[16] = {};
+        const auto mix = static_cast<unsigned long>(GetCurrentProcessId())
+                       ^ static_cast<unsigned long>(GetTickCount64() & 0xFFFFFFFFu);
+        swprintf_s(token, L"%08lx", mix);
+        run_token_ = token;
+    }
     background_ = CreateSolidBrush(cfg_.Background());
 
     WNDCLASSEXW wc{};
@@ -113,6 +125,10 @@ bool DockWindow::Create(HINSTANCE instance)
     // dock would drop the add-column message a second instance sends from the
     // user's ordinary token, and the launch would look like it did nothing.
     ChangeWindowMessageFilterEx(hwnd_, add_column_message_, MSGFLT_ALLOW, nullptr);
+    // The split request carries a path and a command line, so it has to be
+    // WM_COPYDATA. Same deafness as the add-column message: an elevated dock
+    // drops it from an ordinary token unless it is let through.
+    ChangeWindowMessageFilterEx(hwnd_, WM_COPYDATA, MSGFLT_ALLOW, nullptr);
 
     log::WriteBanner(cfg_);
 
@@ -194,6 +210,14 @@ DockWindow::Column* DockWindow::AppendColumn()
     auto column = std::make_unique<Column>();
     column->id = next_column_id_++;
 
+    // The name this column's Windows Terminal window will answer to. It carries
+    // a token unique to this dock process as well as the column id, because
+    // Release detaches a terminal without destroying it: a window from an
+    // earlier run can outlive the dock, and a fixed name would let that stale
+    // window swallow the next launch as a tab, leaving LocateWindow with no new
+    // window to find.
+    column->window_name = ColumnWindowName(column->id);
+
     // Sized by LayoutColumns a moment later. Created empty rather than at a
     // guess, so a panel that never gets laid out is invisible instead of a black
     // rectangle sitting over the column beside it.
@@ -220,7 +244,7 @@ void DockWindow::StartColumn(int id)
         return;
     }
 
-    column->terminal = std::make_unique<Terminal>(column->panel, cfg_);
+    column->terminal = std::make_unique<Terminal>(column->panel, cfg_, column->window_name);
     column->terminal->on_fault = [this](const std::wstring& message) {
         tray_.Notify(message);
     };
@@ -236,10 +260,178 @@ void DockWindow::StartColumn(int id)
     }
     PublishOwnedWindows();
 
+    // Anything that asked for a pane in this column while it was still coming
+    // up. Only now, because wt cannot address a window that does not exist yet,
+    // and the column is looked up again rather than reusing `column`.
+    DrainPendingSplits(id);
+
     // Both the terminal and the shell settle their own geometry after being
     // sized, so the fit is re-applied a few times rather than once.
     fit_ticks_ = 0;
     SetTimer(hwnd_, kTimerFit, 250, nullptr);
+}
+
+std::wstring DockWindow::ColumnWindowName(int id) const
+{
+    // Not numeric and not a reserved word, so Windows Terminal cannot mistake
+    // it for a window id or for "new" / "last".
+    return std::wstring(kWindowNamePrefix) + run_token_ + L"-" + std::to_wstring(id);
+}
+
+LRESULT DockWindow::OnSplitRequest(const COPYDATASTRUCT& data)
+{
+    if (shutting_down_) {
+        return kSplitNotHandled;
+    }
+    if (!cfg_.name_windows) {
+        log::Write(L"split: refused, window naming is off");
+        return kSplitUnnamed;
+    }
+
+    // Everything below is validated before a single character is read. This
+    // arrives from a process we did not start, the pointer is only valid for
+    // the duration of this call, and cbData is the only thing bounding it.
+    if (data.cbData < sizeof(SplitRequest) || !data.lpData) {
+        return kSplitRejected;
+    }
+
+    SplitRequest header{};
+    memcpy(&header, data.lpData, sizeof(header));
+    if (header.version != kSplitRequestVersion) {
+        log::Writef(L"split: refused, request version %u", header.version);
+        return kSplitRejected;
+    }
+
+    const auto* base = static_cast<const char*>(data.lpData);
+    const auto within = [&](UINT32 offset, UINT32 length) {
+        // Lengths are in WCHARs, and the string must carry its terminator.
+        const size_t bytes = static_cast<size_t>(length) * sizeof(wchar_t);
+        if (offset < sizeof(SplitRequest) || bytes > data.cbData) {
+            return false;
+        }
+        return static_cast<size_t>(offset) + bytes <= data.cbData;
+    };
+
+    if (!within(header.cwd_offset, header.cwd_length)
+        || !within(header.cmd_offset, header.cmd_length)) {
+        return kSplitRejected;
+    }
+
+    const std::wstring cwd(reinterpret_cast<const wchar_t*>(base + header.cwd_offset),
+                           header.cwd_length);
+    const std::wstring command(reinterpret_cast<const wchar_t*>(base + header.cmd_offset),
+                               header.cmd_length);
+
+    if (command.empty()) {
+        return kSplitRejected;
+    }
+
+    // Pick a column: the one asked for if it has room, else any with room.
+    Column* target = nullptr;
+    if (header.column_id != 0) {
+        Column* asked = FindColumn(static_cast<int>(header.column_id));
+        if (asked && asked->foreign_panes < kMaxForeignPanesPerColumn) {
+            target = asked;
+        }
+    }
+    if (!target) {
+        for (const auto& column : columns_) {
+            if (column->foreign_panes < kMaxForeignPanesPerColumn) {
+                target = column.get();
+                break;
+            }
+        }
+    }
+
+    LRESULT answer = kSplitAccepted;
+
+    if (!target) {
+        // Every column is full, so this needs a new one. The refusal rules are
+        // OnAddColumnRequest's, reused rather than restated so the two paths
+        // cannot drift.
+        const LRESULT added = OnAddColumnRequest();
+        if (added == kAddColumnAtMax) {
+            return kSplitAtMax;
+        }
+        if (added == kAddColumnNoRoom) {
+            return kSplitNoRoom;
+        }
+        if (added != kAddColumnAdded || columns_.empty()) {
+            return kSplitNotHandled;
+        }
+        target = columns_.back().get();
+        answer = kSplitNewColumn;
+    }
+
+    ++target->foreign_panes;
+    pending_splits_.push_back({ target->id, cwd, command });
+
+    // Posted, not run. The sender is blocked in SendMessage and wt.exe takes
+    // long enough to matter, and the column may not have a terminal yet.
+    if (!PostMessageW(hwnd_, WM_APP_SPLIT_RUN, static_cast<WPARAM>(target->id), 0)) {
+        log::Writef(L"split: could not post the run for #%d (%lu)", target->id,
+                    GetLastError());
+        --target->foreign_panes;
+        pending_splits_.pop_back();
+        return kSplitNotHandled;
+    }
+
+    log::Writef(L"split: accepted for #%d, now %d foreign panes", target->id,
+                target->foreign_panes);
+    return answer;
+}
+
+void DockWindow::OnSplitRun(int column_id)
+{
+    DrainPendingSplits(column_id);
+}
+
+void DockWindow::DrainPendingSplits(int column_id)
+{
+    Column* column = FindColumn(column_id);
+    if (!column) {
+        // The column went while the request was in flight. Drop anything aimed
+        // at it rather than leaving it queued forever.
+        std::erase_if(pending_splits_,
+                      [column_id](const PendingSplit& p) { return p.id == column_id; });
+        return;
+    }
+
+    // Not ready yet. StartColumn calls back here once the terminal is really
+    // embedded, so leaving these queued is the whole point of the queue.
+    if (!column->terminal || !column->terminal->Hwnd()) {
+        return;
+    }
+
+    std::vector<PendingSplit> mine;
+    for (auto it = pending_splits_.begin(); it != pending_splits_.end();) {
+        if (it->id == column_id) {
+            mine.push_back(std::move(*it));
+            it = pending_splits_.erase(it);
+        } else {
+            ++it;
+        }
+    }
+
+    for (const PendingSplit& split : mine) {
+        std::wstring error;
+        if (!column->terminal->SplitPane(split.cwd, split.command, error)) {
+            log::Writef(L"split: #%d failed, %s", column_id, error.c_str());
+            tray_.Notify(L"Could not add a pane: " + error);
+            if (column->foreign_panes > 0) {
+                --column->foreign_panes;
+            }
+            continue;
+        }
+    }
+
+    if (!mine.empty()) {
+        // A split can move the embedded window: Windows Terminal's summon path
+        // touches placement, and placement on a WS_CHILD is read in the parent's
+        // coordinates. Re-fitting costs nothing and puts the chrome trim back if
+        // it did.
+        SetTimer(hwnd_, kTimerFit, 250, nullptr);
+    }
 }
 
 LRESULT DockWindow::OnAddColumnRequest()
@@ -592,6 +784,18 @@ LRESULT DockWindow::WndProc(UINT msg, WPARAM wparam, LPARAM lparam)
     case WM_APP_STOP_REQUESTED:
         log::Write(L"stop: requested over the named event");
         RequestShutdown();
+        return 0;
+
+    case WM_COPYDATA: {
+        const auto* data = reinterpret_cast<const COPYDATASTRUCT*>(lparam);
+        if (!data || data->dwData != kSplitCopyDataId) {
+            break;   // not ours, and DefWindowProc's 0 is the right answer
+        }
+        return OnSplitRequest(*data);
+    }
+
+    case WM_APP_SPLIT_RUN:
+        OnSplitRun(static_cast<int>(wparam));
         return 0;
 
     case WM_APP_COLUMN_START:

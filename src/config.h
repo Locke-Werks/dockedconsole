@@ -27,6 +27,14 @@ enum class DockEdge { Left, Top, Right, Bottom };
 /// again adds one; the third is the last.
 inline constexpr int kMaxColumns = 3;
 
+/// Panes another program may add to one column, on top of the shell this dock
+/// started there.
+///
+/// Windows Terminal halves the focused pane, so two of these leave a half and
+/// two quarters rather than three thirds. Three panes in a 735px strip is
+/// already tight; this is the number to change after living with it.
+inline constexpr int kMaxForeignPanesPerColumn = 2;
+
 /// Physical pixels of desktop that have to survive on the docked axis. A column
 /// that would leave less than this is refused, because a strip that swallows the
 /// screen leaves nowhere to put the windows it displaces and no obvious way back.
@@ -81,6 +89,33 @@ struct Config {
     /// Command line for wt.exe. "-w new" forces a fresh window rather than a tab
     /// in an existing one. Add -p "Profile Name" to pick a specific profile.
     std::wstring terminal_args = L"-w new";
+
+    /// Give each column's window a name of its own, so a pane can be added to
+    /// that column later with `wt -w <name> split-pane`.
+    ///
+    /// Structural rather than a token in terminalArgs, because defaults only
+    /// reach a config that does not exist yet. Every install already has
+    /// terminalArgs written out, so a token there would only ever reach someone
+    /// who edits the file, which is nobody who does not already know about it.
+    /// A name and "new" mean the same thing to Windows Terminal, a fresh
+    /// window, except that a name can be found again afterwards.
+    bool name_windows = true;
+
+    /// Profile for panes added to a column later, empty for the default.
+    ///
+    /// Worth having because a profile can carry "elevate": true, and Windows
+    /// Terminal will not put an elevated pane inside an unelevated window. If
+    /// the dock is unelevated and the default profile wants to elevate, name a
+    /// profile here that does not.
+    std::wstring terminal_profile;
+
+    /// The wt arguments for a column whose window is called window_name.
+    ///
+    /// Substitutes {window} where the user has placed it. Otherwise drops any
+    /// -w the user wrote and prepends its own, which is why this tokenises
+    /// rather than replacing text: a blind strip of "-w new" would also mangle
+    /// -p "New Session".
+    [[nodiscard]] std::wstring TerminalArgsFor(const std::wstring& window_name) const;
 
     /// Pixels of terminal chrome hidden above the top of the dock. -1 measures
     /// Windows Terminal's tab strip at runtime, which is right at any DPI.

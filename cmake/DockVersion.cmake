@@ -4,7 +4,7 @@
 # installer.toml carries the same number and CI asserts the two agree, because
 # Forge stamps the installer from the TOML and cannot see this file.
 set(DOCK_VERSION_MAJOR 0)
-set(DOCK_VERSION_MINOR 3)
+set(DOCK_VERSION_MINOR 4)
 set(DOCK_VERSION_PATCH 0)
 
 set(DOCK_VERSION "${DOCK_VERSION_MAJOR}.${DOCK_VERSION_MINOR}.${DOCK_VERSION_PATCH}")

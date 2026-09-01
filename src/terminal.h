@@ -33,7 +33,12 @@ namespace dock {
 /// tracked by watching the window handle, not a process.
 class Terminal {
 public:
-    Terminal(HWND host, const Config& cfg);
+    /// window_name is substituted for {window} in Config::terminal_args, giving
+    /// this column's Windows Terminal window a name another process can address
+    /// with `wt -w <name>`. Passed at construction because it is fixed for the
+    /// life of the column; a setter would only invite it arriving late, after
+    /// Launch has already built its command line.
+    Terminal(HWND host, const Config& cfg, std::wstring window_name);
     ~Terminal();
 
     Terminal(const Terminal&) = delete;
@@ -46,6 +51,21 @@ public:
     /// or a message when it died so soon after starting that it looks like a
     /// launch failure rather than the user typing exit.
     std::function<void(const std::wstring&)> on_closed;
+
+    /// The -w name this terminal's window answers to. Empty when naming is off,
+    /// which is the one case where nothing can be added to it afterwards.
+    [[nodiscard]] const std::wstring& WindowName() const { return window_name_; }
+
+    /// Adds a pane below the focused one, running `command` in `cwd`.
+    ///
+    /// Runs wt.exe from THIS process, which is the whole point. Windows
+    /// Terminal keeps elevated and unelevated windows in separate monarch
+    /// worlds, so only a process at the same integrity level as the window we
+    /// embedded can reach it. A medium-integrity caller aiming at an elevated
+    /// window does not get an error, it gets a brand new window carrying our
+    /// name, which then owns that name for good.
+    [[nodiscard]] bool SplitPane(const std::wstring& cwd, const std::wstring& command,
+                                 std::wstring& error);
 
     /// Launches and embeds. Safe to call again after the terminal has gone.
     void Start();
@@ -88,6 +108,7 @@ private:
 
     HWND host_;
     const Config& cfg_;
+    std::wstring window_name_;
 
     HWND terminal_ = nullptr;
 

@@ -18,6 +18,9 @@
 #include "monitors.h"
 #include "win32.h"
 
+// CommandLineToArgvW, for splitting the configured terminal arguments.
+#include <shellapi.h>
+
 #include <algorithm>
 #include <vector>
 
@@ -206,6 +209,132 @@ COLORREF Config::Background() const
     return RGB(r, g, b);
 }
 
+namespace {
+
+/// Quotes one argument so CommandLineToArgvW gives it back whole.
+std::wstring QuoteArg(const std::wstring& arg)
+{
+    if (!arg.empty() && arg.find_first_of(L" \t\"") == std::wstring::npos) {
+        return arg;
+    }
+
+    std::wstring out;
+    out.reserve(arg.size() + 8);
+    out.push_back(L'"');
+
+    int slashes = 0;
+    for (const wchar_t c : arg) {
+        if (c == L'\\') {
+            ++slashes;
+            continue;
+        }
+        if (c == L'"') {
+            // Backslashes before a quote are doubled, then the quote escaped.
+            out.append(static_cast<size_t>(slashes) * 2 + 1, L'\\');
+            out.push_back(L'"');
+        } else {
+            out.append(static_cast<size_t>(slashes), L'\\');
+            out.push_back(c);
+        }
+        slashes = 0;
+    }
+
+    // Trailing backslashes would otherwise escape the closing quote.
+    out.append(static_cast<size_t>(slashes) * 2, L'\\');
+    out.push_back(L'"');
+    return out;
+}
+
+/// CommandLineToArgvW over a fragment that is not a whole command line.
+///
+/// Empty in, empty out. CommandLineToArgvW answers an empty string with this
+/// executable's own path, which would quietly turn blank terminal arguments
+/// into an argv of one nonsense entry.
+std::vector<std::wstring> SplitArgs(const std::wstring& text)
+{
+    std::vector<std::wstring> out;
+    if (text.empty()) {
+        return out;
+    }
+
+    int count = 0;
+    wchar_t** argv = CommandLineToArgvW(text.c_str(), &count);
+    if (!argv) {
+        return out;
+    }
+    for (int i = 0; i < count; ++i) {
+        out.emplace_back(argv[i]);
+    }
+    LocalFree(argv);
+    return out;
+}
+
+bool IsWindowFlag(const std::wstring& arg)
+{
+    return arg == L"-w" || arg == L"--window";
+}
+
+bool IsWindowFlagWithValue(const std::wstring& arg)
+{
+    return arg.rfind(L"--window=", 0) == 0
+        || (arg.size() > 2 && arg.rfind(L"-w", 0) == 0 && arg[2] != L'-');
+}
+
+} // namespace
+
+std::wstring Config::TerminalArgsFor(const std::wstring& window_name) const
+{
+    constexpr wchar_t kToken[] = L"{window}";
+    constexpr size_t kTokenLen = std::size(kToken) - 1;
+
+    // The escape hatch first: somebody who has placed the token wants the name
+    // exactly where they put it.
+    if (terminal_args.find(kToken) != std::wstring::npos) {
+        std::wstring out;
+        size_t at = 0;
+        for (;;) {
+            const size_t hit = terminal_args.find(kToken, at);
+            if (hit == std::wstring::npos) {
+                out.append(terminal_args, at, std::wstring::npos);
+                break;
+            }
+            out.append(terminal_args, at, hit - at);
+            out += QuoteArg(window_name);
+            at = hit + kTokenLen;
+        }
+        return out;
+    }
+
+    if (!name_windows || window_name.empty()) {
+        return terminal_args;
+    }
+
+    // Drop whatever -w the user wrote and put ours in front. Tokenised rather
+    // than string-replaced so that -p "New Session" survives intact.
+    std::wstring rest;
+    const std::vector<std::wstring> args = SplitArgs(terminal_args);
+    for (size_t i = 0; i < args.size(); ++i) {
+        if (IsWindowFlag(args[i])) {
+            ++i;   // and its value
+            continue;
+        }
+        if (IsWindowFlagWithValue(args[i])) {
+            continue;
+        }
+        if (!rest.empty()) {
+            rest.push_back(L' ');
+        }
+        rest += QuoteArg(args[i]);
+    }
+
+    std::wstring out = L"-w " + QuoteArg(window_name);
+    if (!rest.empty()) {
+        out.push_back(L' ');
+        out += rest;
+    }
+    return out;
+}
+
 std::wstring Config::ResolveTerminalPath() const
 {
     std::wstring local = KnownFolder(FOLDERID_LocalAppData);
@@ -292,6 +421,8 @@ Config Config::Load(ConfigStatus& status, std::wstring& detail)
     ReadInt(object, L"widthPhysicalPx", config.width_physical_px);
     ReadString(object, L"monitorDeviceName", config.monitor_device_name);
     ReadString(object, L"terminalArgs", config.terminal_args);
+    ReadBool(object, L"nameWindows", config.name_windows);
+    ReadString(object, L"terminalProfile", config.terminal_profile);
     ReadInt(object, L"chromeTrimPx", config.chrome_trim_px);
     ReadString(object, L"elevation", config.elevation);
     ReadString(object, L"onShellExit", config.on_shell_exit);
@@ -340,6 +471,8 @@ bool Config::Save() const
     line(L"monitorDeviceName",
          monitor_device_name.empty() ? L"null" : json::Quote(monitor_device_name));
     line(L"terminalArgs", json::Quote(terminal_args));
+    line(L"nameWindows", name_windows ? L"true" : L"false");
+    line(L"terminalProfile", json::Quote(terminal_profile));
     line(L"chromeTrimPx", std::to_wstring(chrome_trim_px));
     line(L"elevation", json::Quote(elevation));
     line(L"onShellExit", json::Quote(on_shell_exit));

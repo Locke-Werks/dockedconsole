@@ -122,6 +122,57 @@ private:
     return true;
 }
 
+/// Quotes one argument so CommandLineToArgvW gives it back whole.
+std::wstring QuoteArg(const std::wstring& arg)
+{
+    if (!arg.empty() && arg.find_first_of(L" \t\"") == std::wstring::npos) {
+        return arg;
+    }
+
+    std::wstring out;
+    out.reserve(arg.size() + 8);
+    out.push_back(L'"');
+
+    int slashes = 0;
+    for (const wchar_t c : arg) {
+        if (c == L'\\') {
+            ++slashes;
+            continue;
+        }
+        if (c == L'"') {
+            out.append(static_cast<size_t>(slashes) * 2 + 1, L'\\');
+            out.push_back(L'"');
+        } else {
+            out.append(static_cast<size_t>(slashes), L'\\');
+            out.push_back(c);
+        }
+        slashes = 0;
+    }
+    out.append(static_cast<size_t>(slashes) * 2, L'\\');
+    out.push_back(L'"');
+    return out;
+}
+
+/// Escapes the separators Windows Terminal reads out of a command line.
+///
+/// wt treats ; as "start another subcommand here", so a command containing one
+/// is cut in half and the tail is parsed as a wt verb. Found the hard way: a
+/// pwsh -Command with a semicolon in it failed with
+/// "[error 2147942402 when launching '" Get-Location"']".
+std::wstring EscapeSeparators(const std::wstring& s)
+{
+    std::wstring out;
+    out.reserve(s.size() + 8);
+    for (const wchar_t c : s) {
+        if (c == L';') {
+            out.push_back(L'\\');
+        }
+        out.push_back(c);
+    }
+    return out;
+}
+
+
 } // namespace
 
 int MeasureChrome(HWND terminal)
@@ -134,11 +185,78 @@ int MeasureChrome(HWND terminal)
     return search.trim;
 }
 
-Terminal::Terminal(HWND host, const Config& cfg) : host_(host), cfg_(cfg) {}
+Terminal::Terminal(HWND host, const Config& cfg, std::wstring window_name)
+    : host_(host), cfg_(cfg), window_name_(std::move(window_name))
+{
+}
 
 Terminal::~Terminal()
 {
     Release();
+}
+
+bool Terminal::SplitPane(const std::wstring& cwd, const std::wstring& command,
+                         std::wstring& error)
+{
+    if (window_name_.empty()) {
+        error = L"this column's window has no name, so a pane cannot be added to it";
+        return false;
+    }
+    if (!terminal_ || !IsWindow(terminal_)) {
+        error = L"this column has no terminal";
+        return false;
+    }
+
+    const std::wstring wt = cfg_.ResolveTerminalPath();
+    if (GetFileAttributesW(wt.c_str()) == INVALID_FILE_ATTRIBUTES) {
+        error = L"wt.exe was not found at " + wt;
+        return false;
+    }
+
+    // -s 0.5 halves the focused pane. Splitting twice therefore leaves a half
+    // and two quarters rather than three thirds, which is what Windows Terminal
+    // does and is left alone deliberately: the alternative is tracking how many
+    // panes are already there and computing a ratio, and the count is exactly
+    // the thing nothing can observe.
+    std::wstring line = L"\"" + wt + L"\" -w " + QuoteArg(window_name_)
+                      + L" split-pane -H -s 0.5";
+
+    if (!cfg_.terminal_profile.empty()) {
+        line += L" -p " + QuoteArg(cfg_.terminal_profile);
+    }
+    if (!cwd.empty()) {
+        line += L" -d " + QuoteArg(cwd);
+    }
+
+    // Everything after -- is the command. Semicolons have to go: wt reads one
+    // as its own subcommand separator and would cut the command line in half
+    // before the shell ever saw it.
+    line += L" -- " + EscapeSeparators(command);
+
+    // CreateProcessW writes into lpCommandLine, so it must be a writable buffer.
+    std::wstring mutable_line = line;
+
+    STARTUPINFOW startup{};
+    startup.cb = sizeof(startup);
+    PROCESS_INFORMATION process{};
+
+    if (!CreateProcessW(wt.c_str(), mutable_line.data(), nullptr, nullptr, FALSE,
+                        CREATE_NO_WINDOW, nullptr, nullptr, &startup, &process)) {
+        const DWORD err = GetLastError();
+        log::Writef(L"split: CreateProcessW failed (%lu)", err);
+        error = L"could not start wt.exe (" + std::to_wstring(err) + L")";
+        return false;
+    }
+
+    // Nothing to wait on. wt.exe is a stub that hands the request to the
+    // monarch and exits, so its exit code says nothing about whether the pane
+    // appeared.
+    CloseHandle(process.hThread);
+    CloseHandle(process.hProcess);
+
+    log::Writef(L"split: asked %s for a pane in %s", window_name_.c_str(),
+                cwd.empty() ? L"(no directory)" : cwd.c_str());
+    return true;
 }
 
 bool Terminal::Launch()
@@ -159,7 +277,7 @@ bool Terminal::Launch()
     // CreateProcessW writes into lpCommandLine, so it must be a writable buffer.
     // Passing a literal or a c_str() is undefined behaviour and corrupts memory
     // on some paths rather than failing cleanly.
-    std::wstring command_line = L"\"" + wt + L"\" " + cfg_.terminal_args;
+    std::wstring command_line = L"\"" + wt + L"\" " + cfg_.TerminalArgsFor(window_name_);
 
     STARTUPINFOW startup{};
     startup.cb = sizeof(startup);

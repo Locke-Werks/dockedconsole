@@ -81,6 +81,18 @@ private:
         int id = 0;
         HWND panel = nullptr;
         std::unique_ptr<Terminal> terminal;
+
+        /// The -w name its terminal was launched with. Assigned once, at
+        /// AppendColumn, so a restarted shell comes back in the same window and
+        /// panes already aimed at that column keep landing there.
+        std::wstring window_name;
+
+        /// Panes added on another program's behalf, on top of the shell this
+        /// dock started. Best effort and it only ever over-counts: a pane the
+        /// user closes by hand is invisible from here, exactly as it is to
+        /// everyone else, because Windows Terminal publishes no pane count.
+        /// "Restart shell" on the column is the way back.
+        int foreign_panes = 0;
         /// Why the terminal went, if it went badly. Read once, by the handler
         /// that takes the column down.
         std::wstring failure;
@@ -111,6 +123,11 @@ private:
     /// Appends a column with its panel created but no terminal yet. Null if the
     /// panel could not be created.
     [[nodiscard]] Column* AppendColumn();
+    [[nodiscard]] std::wstring ColumnWindowName(int id) const;
+
+    [[nodiscard]] LRESULT OnSplitRequest(const COPYDATASTRUCT& data);
+    void OnSplitRun(int column_id);
+    void DrainPendingSplits(int column_id);
 
     void StartColumn(int id);
     void OnColumnGone(int id);
@@ -190,6 +207,20 @@ private:
     std::vector<Retired> retired_;
 
     int next_column_id_ = 1;
+
+    /// Unique to this dock process; see kWindowNamePrefix.
+    std::wstring run_token_;
+
+    struct PendingSplit {
+        int id = 0;
+        std::wstring cwd;
+        std::wstring command;
+    };
+
+    /// Requests accepted while a column's terminal was still coming up. Drained
+    /// once it is really embedded, because wt cannot address a window that does
+    /// not exist yet.
+    std::vector<PendingSplit> pending_splits_;
 
     /// The column the tray's "Restart shell" acts on and the one focus goes to.
     int active_column_id_ = 0;

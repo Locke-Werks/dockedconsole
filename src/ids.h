@@ -50,6 +50,51 @@ enum AddColumnResult : LRESULT {
     kAddColumnNoRoom = 3,
 };
 
+/// Prefix of a column's Windows Terminal window name. The rest is a token
+/// unique to this dock process plus the column id: "dock-3fa91c02-2".
+///
+/// The token is not decoration. Release detaches a terminal without destroying
+/// it, so a Windows Terminal window outlives the dock that made it whenever an
+/// embed is abandoned. Without the token a later run would hand out a name that
+/// stale window still answers to, and every pane meant for the dock would land
+/// in a window sitting behind it.
+inline constexpr wchar_t kWindowNamePrefix[] = L"dock-";
+
+/// Identifies our WM_COPYDATA, so a stray one from anything else is ignored.
+/// Bumped if SplitRequest ever changes shape, because the sender and the
+/// receiver need not be the same build.
+inline constexpr ULONG_PTR kSplitCopyDataId = 0x44434B31;   // 'DCK1'
+
+/// A request to run something in a new pane of one of our columns.
+///
+/// Fixed header, then two NUL-terminated wide strings laid out after it. Every
+/// offset and length is in WCHARs and is checked against cbData before a single
+/// character is read: this arrives from a process we did not start.
+struct SplitRequest {
+    UINT32 version;      // 1
+    UINT32 column_id;    // 0 means any column with room
+    UINT32 cwd_offset;
+    UINT32 cwd_length;
+    UINT32 cmd_offset;
+    UINT32 cmd_length;
+};
+
+inline constexpr UINT32 kSplitRequestVersion = 1;
+
+/// What the dock answers a split request. Same contract discipline as
+/// AddColumnResult: add to the end, never renumber, and zero stays "not
+/// handled" because that is both what DefWindowProc returns in a build that
+/// predates the message and what a UIPI-dropped message looks like.
+enum SplitResult : LRESULT {
+    kSplitNotHandled = 0,   // older build, dropped by UIPI, or shutting down
+    kSplitAccepted = 1,     // queued for a column that already exists
+    kSplitNewColumn = 2,    // a column was added and the pane is queued behind it
+    kSplitAtMax = 3,        // every column is at its pane cap
+    kSplitNoRoom = 4,       // the display cannot take another column
+    kSplitRejected = 5,     // malformed request
+    kSplitUnnamed = 6,      // naming is off, so no column can be addressed
+};
+
 // Private messages.
 inline constexpr UINT WM_APP_TRAY = WM_APP + 1;
 inline constexpr UINT WM_APP_STOP_REQUESTED = WM_APP + 2;
@@ -60,6 +105,11 @@ inline constexpr UINT WM_APP_TERMINAL_GONE = WM_APP + 3;
 /// handler is running on a SendMessage from the process the user just started,
 /// and a cold terminal takes seconds to appear.
 inline constexpr UINT WM_APP_COLUMN_START = WM_APP + 4;
+
+/// Posted after a split request has been accepted. Same reason as
+/// WM_APP_COLUMN_START: the handler that answers is running on a SendMessage
+/// from another process, and launching wt.exe there would block it.
+inline constexpr UINT WM_APP_SPLIT_RUN = WM_APP + 6;
 
 /// A column's terminal has gone. Posted, never called directly: the notification
 /// arrives from inside the Terminal's own code, so the column cannot be taken

@@ -218,6 +218,8 @@ geometry changes live.
 | `widthPhysicalPx` | `735` | Thickness of **one column** in **physical** pixels, not scaled by DPI |
 | `monitorDeviceName` | `null` | e.g. `\\.\DISPLAY2`, or null for primary |
 | `terminalArgs` | `-w new` | wt.exe args. `-p "Profile"` to pick a profile |
+| `nameWindows` | `true` | Give each column's window a name, so panes can be added to it |
+| `terminalProfile` | *(empty)* | Profile for panes added later. Empty uses the default |
 | `chromeTrimPx` | `-1` | `-1` measures the tab strip at runtime |
 | `elevation` | `auto` | `auto`, `never`, `always`. See below |
 | `onShellExit` | `quit` | `quit` closes the dock, `relaunch` gives you a fresh shell |
@@ -311,6 +313,57 @@ the result instead of leaving it to whatever the ordinary band happens to look
 like. The recovery is on the flyout's hide event with a one-second poll behind
 it, because a missed show costs one flyout and a missed hide would cost the dock
 the only thing it does.
+
+## Asking for a pane
+
+Another program can put a terminal in a column. ProjectMan does this to run
+Claude Code in a project without opening a window of its own.
+
+Send the dock a `WM_COPYDATA` carrying a working directory and a command line:
+
+```cpp
+HWND dock = FindWindowW(L"DockedConsole.Host", L"Docked Console");
+
+COPYDATASTRUCT data{};
+data.dwData = 0x44434B31;   // 'DCK1'
+data.cbData = /* header + both strings */;
+data.lpData = block;
+
+SendMessageTimeoutW(dock, WM_COPYDATA, 0, reinterpret_cast<LPARAM>(&data),
+                    SMTO_ABORTIFHUNG | SMTO_ERRORONEXIT, 5000, &answer);
+```
+
+The block is `SplitRequest` from `src/ids.h` followed by two NUL-terminated wide
+strings. Offsets are bytes from the start of the block, lengths are in WCHARs,
+and every one of them is checked against `cbData` before a character is read.
+
+The answer is one of `SplitResult`, and the numbers are contract: add to the
+end, never renumber.
+
+| | |
+|---|---|
+| `0` not handled | an older build, shutting down, or the message was dropped |
+| `1` accepted | queued for a column that already exists |
+| `2` new column | a column was added and the pane is queued behind it |
+| `3` at max | every column is at its pane cap |
+| `4` no room | the display cannot take another column |
+| `5` rejected | the request was malformed |
+| `6` unnamed | `nameWindows` is off, so no column can be addressed |
+
+**The dock runs the `wt` command itself, and that is the point.** Windows
+Terminal keeps elevated and unelevated windows in separate monarch worlds, so a
+program at a different integrity level cannot address the dock's window. Aiming
+`wt -w <name>` at it from the wrong level does not fail: Windows Terminal makes
+a **new** window carrying that name, which then owns the name for good and
+swallows every later pane meant for that column. Doing the split here removes
+the boundary, because the dock is the process that embedded the window.
+`WM_COPYDATA` is allowed through UIPI explicitly, so the request itself crosses
+levels fine.
+
+Two columns' worth of panes is the cap, `kMaxForeignPanesPerColumn` in
+`src/config.h`. It only ever over-counts: a pane closed by hand is invisible
+from here, because Windows Terminal publishes no pane count anywhere. "Restart
+shell" on the column clears it.
 
 ## What it cannot do
 
