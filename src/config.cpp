@@ -38,43 +38,6 @@ std::wstring PerUserPath()
     return JoinPath(JoinPath(std::move(dir), L"DockedConsole"), kFileName);
 }
 
-/// Reads a UTF-8 file into UTF-16. Empty on any failure, which the caller treats
-/// as unreadable rather than as an empty config.
-bool ReadTextFile(const std::wstring& path, std::wstring& out)
-{
-    Handle file(CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr,
-                            OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr));
-    if (!file) {
-        return false;
-    }
-
-    LARGE_INTEGER size{};
-    if (!GetFileSizeEx(file.Get(), &size) || size.QuadPart > (8 << 20)) {
-        return false;
-    }
-
-    std::string bytes(static_cast<size_t>(size.QuadPart), '\0');
-    DWORD read = 0;
-    if (!bytes.empty()
-        && !ReadFile(file.Get(), bytes.data(), static_cast<DWORD>(bytes.size()),
-                     &read, nullptr)) {
-        return false;
-    }
-    bytes.resize(read);
-
-    // Strip a UTF-8 BOM. System.Text.Json consumed it silently, so any file that
-    // has been through Notepad carries one and would otherwise fail on the
-    // invisible U+FEFF before the first key.
-    if (bytes.size() >= 3 && static_cast<unsigned char>(bytes[0]) == 0xEF
-        && static_cast<unsigned char>(bytes[1]) == 0xBB
-        && static_cast<unsigned char>(bytes[2]) == 0xBF) {
-        bytes.erase(0, 3);
-    }
-
-    out = Widen(bytes);
-    return true;
-}
-
 bool WriteTextFile(const std::wstring& path, const std::wstring& text)
 {
     const size_t slash = path.find_last_of(L'\\');
@@ -140,8 +103,14 @@ void ReadStringArray(const json::Object& object, std::wstring_view key,
                      std::vector<std::wstring>& out)
 {
     const json::Value* value = json::Find(object, key);
-    if (value && value->type == json::Value::Type::Array) {
-        out = value->array;
+    if (!value || value->type != json::Value::Type::Array) {
+        return;
+    }
+    // The parser has already refused anything but strings in this file's
+    // arrays, so every element is one.
+    out.clear();
+    for (const json::Value& element : value->array) {
+        out.push_back(element.string);
     }
 }
 
@@ -335,6 +304,22 @@ std::wstring Config::TerminalArgsFor(const std::wstring& window_name) const
     return out;
 }
 
+std::wstring Config::ProfileSelector() const
+{
+    const std::vector<std::wstring> args = SplitArgs(terminal_args);
+    for (size_t i = 0; i < args.size(); ++i) {
+        const std::wstring& arg = args[i];
+        if ((arg == L"-p" || arg == L"--profile") && i + 1 < args.size()) {
+            return args[i + 1];
+        }
+        constexpr std::wstring_view kAttached = L"--profile=";
+        if (arg.rfind(kAttached, 0) == 0) {
+            return arg.substr(kAttached.size());
+        }
+    }
+    return {};
+}
+
 std::wstring Config::ResolveTerminalPath() const
 {
     std::wstring local = KnownFolder(FOLDERID_LocalAppData);
@@ -403,7 +388,7 @@ Config Config::Load(ConfigStatus& status, std::wstring& detail)
     }
 
     std::wstring text;
-    if (!ReadTextFile(path, text)) {
+    if (!ReadUtf8File(path, text)) {
         status = ConfigStatus::Unreadable;
         detail = L"could not read " + path;
         return config;

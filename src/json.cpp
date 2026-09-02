@@ -219,19 +219,35 @@ bool ParseNumber(Scanner& scanner, Value& out, std::wstring& error)
     return true;
 }
 
-bool ParseValue(Scanner& scanner, Value& out, std::wstring& error, int depth);
+bool ParseValue(Scanner& scanner, Value& out, std::wstring& error, int depth,
+                const ParseOptions& options);
+bool ParseObjectBody(Scanner& scanner, Object& out, std::wstring& error, int depth,
+                     const ParseOptions& options);
 
-/// The config schema is one flat object whose only compound value is an array of
-/// strings, so nesting deeper than this is malformed by definition. The limit is
-/// not a style choice: ParseValue and ParseArray are mutually recursive, so a
-/// file of "{\"a\":[[[[[..." would recurse once per bracket and overflow the
-/// stack, which is a crash on a file the user can edit.
-constexpr int kMaxDepth = 16;
+/// The dock's config is one flat object whose only compound value is an array
+/// of strings, so nesting deeper than this is malformed by definition there. A
+/// Windows Terminal settings file is a few levels deep and gets more room. The
+/// limit is not a style choice either way: the parse functions are mutually
+/// recursive, so a file of "{\"a\":[[[[[..." would recurse once per bracket and
+/// overflow the stack, which is a crash on a file the user can edit.
+constexpr int kMaxDepthFlat = 16;
+constexpr int kMaxDepthNested = 32;
 
-bool ParseArray(Scanner& scanner, Value& out, std::wstring& error, int depth)
+bool TooDeep(Scanner& scanner, int depth, const ParseOptions& options, std::wstring& error)
 {
-    if (depth >= kMaxDepth) {
-        error = Fail(scanner, L"nested too deeply for this config's schema");
+    if (depth < (options.allow_nesting ? kMaxDepthNested : kMaxDepthFlat)) {
+        return false;
+    }
+    error = Fail(scanner, options.allow_nesting
+                              ? L"nested too deeply"
+                              : L"nested too deeply for this config's schema");
+    return true;
+}
+
+bool ParseArray(Scanner& scanner, Value& out, std::wstring& error, int depth,
+                const ParseOptions& options)
+{
+    if (TooDeep(scanner, depth, options, error)) {
         return false;
     }
 
@@ -246,17 +262,17 @@ bool ParseArray(Scanner& scanner, Value& out, std::wstring& error, int depth)
         }
 
         Value element;
-        if (!ParseValue(scanner, element, error, depth + 1)) {
+        if (!ParseValue(scanner, element, error, depth + 1, options)) {
             return false;
         }
 
-        // Only arrays of strings exist in this config. Anything else is a typo
-        // worth naming rather than silently dropping.
-        if (element.type != Value::Type::String) {
+        // Only arrays of strings exist in the dock's config. Anything else there
+        // is a typo worth naming rather than silently dropping.
+        if (!options.allow_nesting && element.type != Value::Type::String) {
             error = Fail(scanner, L"arrays in this file may only contain strings");
             return false;
         }
-        out.array.push_back(std::move(element.string));
+        out.array.push_back(std::move(element));
 
         scanner.SkipTrivia();
         if (scanner.TakeIf(L',')) {
@@ -271,10 +287,10 @@ bool ParseArray(Scanner& scanner, Value& out, std::wstring& error, int depth)
     }
 }
 
-bool ParseValue(Scanner& scanner, Value& out, std::wstring& error, int depth)
+bool ParseValue(Scanner& scanner, Value& out, std::wstring& error, int depth,
+                const ParseOptions& options)
 {
-    if (depth >= kMaxDepth) {
-        error = Fail(scanner, L"nested too deeply for this config's schema");
+    if (TooDeep(scanner, depth, options, error)) {
         return false;
     }
 
@@ -287,7 +303,7 @@ bool ParseValue(Scanner& scanner, Value& out, std::wstring& error, int depth)
     }
 
     if (c == L'[') {
-        return ParseArray(scanner, out, error, depth + 1);
+        return ParseArray(scanner, out, error, depth + 1, options);
     }
 
     if (c == L't' || c == L'f' || c == L'n') {
@@ -309,28 +325,22 @@ bool ParseValue(Scanner& scanner, Value& out, std::wstring& error, int depth)
     }
 
     if (c == L'{') {
-        error = Fail(scanner, L"nested objects are not part of this config's schema");
-        return false;
+        if (!options.allow_nesting) {
+            error = Fail(scanner, L"nested objects are not part of this config's schema");
+            return false;
+        }
+        scanner.Take(); // '{'
+        out.type = Value::Type::Object;
+        return ParseObjectBody(scanner, out.object, error, depth + 1, options);
     }
 
     return ParseNumber(scanner, out, error);
 }
 
-} // namespace
-
-bool ParseObject(std::wstring_view text, Object& out, std::wstring& error)
+/// Everything after an object's opening brace, through its closing one.
+bool ParseObjectBody(Scanner& scanner, Object& out, std::wstring& error, int depth,
+                     const ParseOptions& options)
 {
-    out.clear();
-    error.clear();
-
-    Scanner scanner(text);
-    scanner.SkipTrivia();
-
-    if (!scanner.TakeIf(L'{')) {
-        error = Fail(scanner, L"the file must start with '{'");
-        return false;
-    }
-
     for (;;) {
         scanner.SkipTrivia();
         if (scanner.TakeIf(L'}')) {
@@ -354,7 +364,7 @@ bool ParseObject(std::wstring_view text, Object& out, std::wstring& error)
         }
 
         Value value;
-        if (!ParseValue(scanner, value, error, 1)) {
+        if (!ParseValue(scanner, value, error, depth, options)) {
             return false;
         }
         out.emplace_back(std::move(key), std::move(value));
@@ -372,6 +382,25 @@ bool ParseObject(std::wstring_view text, Object& out, std::wstring& error)
     }
 }
 
+} // namespace
+
+bool ParseObject(std::wstring_view text, Object& out, std::wstring& error,
+                 ParseOptions options)
+{
+    out.clear();
+    error.clear();
+
+    Scanner scanner(text);
+    scanner.SkipTrivia();
+
+    if (!scanner.TakeIf(L'{')) {
+        error = Fail(scanner, L"the file must start with '{'");
+        return false;
+    }
+
+    return ParseObjectBody(scanner, out, error, 1, options);
+}
+
 const Value* Find(const Object& object, std::wstring_view key)
 {
     for (const auto& [name, value] : object) {
@@ -380,6 +409,14 @@ const Value* Find(const Object& object, std::wstring_view key)
         }
     }
     return nullptr;
+}
+
+const Value* Find(const Value& value, std::wstring_view key)
+{
+    if (value.type != Value::Type::Object) {
+        return nullptr;
+    }
+    return Find(value.object, key);
 }
 
 std::wstring Quote(std::wstring_view value)

@@ -90,6 +90,16 @@ public:
 
     [[nodiscard]] HWND Hwnd() const { return terminal_; }
 
+    /// Panes the embedded window is showing, or -1 when that cannot be told.
+    /// Asks the terminal through UI Automation, which is the only place Windows
+    /// Terminal publishes them; see pane_probe.h for what the number can miss.
+    [[nodiscard]] int LivePaneCount() const;
+
+    /// True when the terminal is still our child and sits exactly where Fit()
+    /// put it. A split, a summon or the terminal's own start-up can move it,
+    /// and a moved terminal shows its tab strip or leaves a gap at the bottom.
+    [[nodiscard]] bool IsFitted() const;
+
     /// True while Start() is on the stack. Start pumps the message queue, so a
     /// message dispatched from inside it can decide to throw this object away,
     /// and destroying it there frees the Start() that is still running. Callers
@@ -106,8 +116,12 @@ public:
 
 private:
     [[nodiscard]] bool Launch();
-    [[nodiscard]] HWND LocateWindow(const std::vector<HWND>& existing, DWORD& owner_pid);
-    void WaitUntilReady(HWND hwnd);
+    [[nodiscard]] HWND LocateWindow(const std::vector<HWND>& existing, DWORD& owner_pid,
+                                    ULONGLONG timeout_ms);
+
+    enum class Ready { Settled, Vanished, TimedOut };
+    [[nodiscard]] Ready WaitUntilReady(HWND hwnd);
+
     [[nodiscard]] std::wstring Embed(HWND child, DWORD owner_pid);
     void ReassertChildState();
     [[nodiscard]] int ChromeTrim();

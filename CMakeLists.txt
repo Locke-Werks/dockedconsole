@@ -47,6 +47,7 @@ add_executable(dockedconsole WIN32
     src/win32.cpp
     src/json.cpp
     src/config.cpp
+    src/wt_settings.cpp
     src/monitors.cpp
     src/diag_log.cpp
     src/elevation.cpp
@@ -56,6 +57,7 @@ add_executable(dockedconsole WIN32
     src/enforcer.cpp
     src/taskbar_claim.cpp
     src/terminal.cpp
+    src/pane_probe.cpp
     src/tray.cpp
     src/dock_window.cpp
     "${CMAKE_CURRENT_BINARY_DIR}/dockedconsole.rc"
@@ -80,6 +82,7 @@ target_link_libraries(dockedconsole PRIVATE
     advapi32    # OpenProcessToken, GetTokenInformation, the HKCU Run key
     gdi32       # CreateSolidBrush for the dock background
     ole32       # CoTaskMemFree, for SHGetKnownFolderPath's output
+    oleaut32    # SysAllocString and VariantClear, for the UI Automation pane count
     dwmapi      # DWMWA_EXTENDED_FRAME_BOUNDS and DWMWA_CLOAKED, the enforcer's eyes
     shlwapi
     pathcch     # long-path-safe path building; the manifest is longPathAware

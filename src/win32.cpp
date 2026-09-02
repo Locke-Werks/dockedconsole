@@ -86,6 +86,41 @@ bool FileExists(const std::wstring& path)
         && (attributes & FILE_ATTRIBUTE_DIRECTORY) == 0;
 }
 
+bool ReadUtf8File(const std::wstring& path, std::wstring& out)
+{
+    Handle file(CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr,
+                            OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr));
+    if (!file) {
+        return false;
+    }
+
+    LARGE_INTEGER size{};
+    if (!GetFileSizeEx(file.Get(), &size) || size.QuadPart > (8 << 20)) {
+        return false;
+    }
+
+    std::string bytes(static_cast<size_t>(size.QuadPart), '\0');
+    DWORD read = 0;
+    if (!bytes.empty()
+        && !ReadFile(file.Get(), bytes.data(), static_cast<DWORD>(bytes.size()),
+                     &read, nullptr)) {
+        return false;
+    }
+    bytes.resize(read);
+
+    // Strip a UTF-8 BOM. System.Text.Json consumed it silently, so any config
+    // that has been through Notepad carries one and would otherwise fail on the
+    // invisible U+FEFF before the first key.
+    if (bytes.size() >= 3 && static_cast<unsigned char>(bytes[0]) == 0xEF
+        && static_cast<unsigned char>(bytes[1]) == 0xBB
+        && static_cast<unsigned char>(bytes[2]) == 0xBF) {
+        bytes.erase(0, 3);
+    }
+
+    out = Widen(bytes);
+    return true;
+}
+
 bool EnsureDirectory(const std::wstring& path)
 {
     if (path.empty()) {

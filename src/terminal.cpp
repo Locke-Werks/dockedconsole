@@ -17,7 +17,9 @@
 #include "diag_log.h"
 #include "elevation.h"
 #include "monitors.h"
+#include "pane_probe.h"
 #include "win32.h"
+#include "wt_settings.h"
 
 #include <algorithm> // std::find, std::min, std::max
 #include <vector>
@@ -30,6 +32,11 @@ constexpr wchar_t kDragBarClass[] = L"DRAG_BAR_WINDOW_CLASS";
 
 constexpr ULONGLONG kLocateTimeoutMs = 15000;
 constexpr ULONGLONG kReadyTimeoutMs = 10000;
+
+/// How long a window that closed while we waited is given to be replaced.
+/// Windows Terminal opens the elevated instance before closing the window it
+/// is moving out of, so the replacement is normally there already.
+constexpr ULONGLONG kReplacementTimeoutMs = 3000;
 constexpr ULONGLONG kRapidFailureWindowMs = 3000;
 constexpr ULONGLONG kStartupFailureWindowMs = 2000;
 constexpr int kMaxRapidFailures = 5;
@@ -172,6 +179,34 @@ std::wstring EscapeSeparators(const std::wstring& s)
     return out;
 }
 
+/// The message for a window that Windows Terminal closed and reopened elevated
+/// while an unelevated dock was waiting to capture it.
+std::wstring ReplacedElevatedMessage(const std::wstring& cause, const Config& cfg,
+                                     const ProfileElevation& profile)
+{
+    std::wstring text =
+        L"Windows Terminal closed the window it opened for the dock and reopened it "
+        L"elevated, because " + cause + L". An unelevated Docked Console cannot "
+        L"capture an elevated window, so the dock has undocked.\n\n";
+
+    if (cfg.ParsedElevation() == ElevationPolicy::Never) {
+        text += L"Set \"elevation\" to \"auto\" in dockedconsole.json, run Docked Console "
+                L"as administrator, or point terminalArgs -p at a profile that does not "
+                L"elevate.";
+    } else {
+        // "auto" should have elevated up front. It did not, so the prediction
+        // that it rests on came back unknown or wrong; say which.
+        text += L"Docked Console could not see this coming from the Windows Terminal "
+                L"settings";
+        if (!profile.detail.empty()) {
+            text += L" (" + profile.detail + L")";
+        }
+        text += L". Run it as administrator, or set \"elevation\" to \"always\".";
+    }
+
+    text += L"\n\nThe elevated terminal window it opened is still on the desktop.";
+    return text;
+}
 
 } // namespace
 
@@ -245,6 +280,10 @@ bool Terminal::SplitPane(const std::wstring& cwd, const std::wstring& command,
         line += L" -- " + EscapeSeparators(command);
     }
 
+    // The whole line, because when a pane dies seconds after it appears the
+    // command it was given is the first thing anyone needs to know.
+    log::Writef(L"split: wt line %s", log::Abbrev(line, 400).c_str());
+
     // CreateProcessW writes into lpCommandLine, so it must be a writable buffer.
     std::wstring mutable_line = line;
 
@@ -306,6 +345,8 @@ bool Terminal::Launch()
         command_line += L" -- " + EscapeSeparators(initial_command_);
     }
 
+    log::Writef(L"launch: %s", log::Abbrev(command_line, 400).c_str());
+
     STARTUPINFOW startup{};
     startup.cb = sizeof(startup);
     PROCESS_INFORMATION process{};
@@ -348,7 +389,7 @@ void Terminal::Start()
     }
 
     DWORD owner_pid = 0;
-    HWND hwnd = LocateWindow(existing, owner_pid);
+    HWND hwnd = LocateWindow(existing, owner_pid, kLocateTimeoutMs);
 
     // Everything from here down runs after PumpFor has dispatched messages, so
     // teardown may already have happened underneath us. Release() sets
@@ -381,11 +422,63 @@ void Terminal::Start()
     // has finished building itself. Reparenting into that gap is the difference
     // between a dock that works when a terminal was already running and one that
     // does not.
-    WaitUntilReady(hwnd);
+    const Ready ready = WaitUntilReady(hwnd);
 
     if (released_) {
         log::Write(L"ready: abandoned, the dock is shutting down");
         return;
+    }
+
+    if (ready == Ready::Vanished) {
+        // A profile with "elevate": true makes Windows Terminal open the tab in
+        // an elevated instance of itself and close the window it opened first,
+        // as soon as the tab has moved. The replacement is a new top-level
+        // window, so look for one before concluding that nothing is there.
+        std::vector<HWND> gone = existing;
+        gone.push_back(hwnd);
+
+        DWORD replacement_pid = 0;
+        const HWND replacement = LocateWindow(gone, replacement_pid, kReplacementTimeoutMs);
+        if (released_) {
+            log::Write(L"vanish: abandoned, the dock is shutting down");
+            return;
+        }
+
+        if (!replacement) {
+            log::Write(L"vanish: no replacement window appeared");
+        } else {
+            const int replacement_elevated = IsProcessElevated(replacement_pid);
+            log::Writef(L"vanish: replaced by hwnd=0x%p ownerPid=%lu ownerElevated=%s "
+                        L"weAreElevated=%s",
+                        replacement, replacement_pid, log::Describe(replacement_elevated),
+                        log::Describe(IsCurrentProcessElevated() ? 1 : 0));
+
+            if (replacement_elevated == 1 && !IsCurrentProcessElevated()) {
+                // Not capturable from here, and the reason is knowable: name it
+                // instead of reporting a generic failure against a dead handle.
+                const ProfileElevation profile =
+                    PredictProfileElevation(cfg_, ProfileTarget::Column);
+                const std::wstring cause =
+                    profile.elevates == 1
+                        ? DescribeProfileElevation(profile)
+                        : std::wstring(L"an elevated Windows Terminal took over the request");
+                log::Writef(L"vanish: cause: %s", cause.c_str());
+                if (on_closed) {
+                    on_closed(ReplacedElevatedMessage(cause, cfg_, profile));
+                }
+                return;
+            }
+
+            // Same integrity level as us, so it is ours to take: carry on with
+            // the replacement exactly as if it had been the first window.
+            hwnd = replacement;
+            owner_pid = replacement_pid;
+            (void)WaitUntilReady(hwnd);
+            if (released_) {
+                log::Write(L"ready: abandoned, the dock is shutting down");
+                return;
+            }
+        }
     }
 
     // terminal_ is deliberately NOT set here. Embed sets it, and only after the
@@ -449,9 +542,10 @@ void Terminal::Restart()
     Start();
 }
 
-HWND Terminal::LocateWindow(const std::vector<HWND>& existing, DWORD& owner_pid)
+HWND Terminal::LocateWindow(const std::vector<HWND>& existing, DWORD& owner_pid,
+                            ULONGLONG timeout_ms)
 {
-    const ULONGLONG deadline = GetTickCount64() + kLocateTimeoutMs;
+    const ULONGLONG deadline = GetTickCount64() + timeout_ms;
 
     while (GetTickCount64() < deadline) {
         for (HWND candidate : FindWindowsByClass(kTerminalClass)) {
@@ -472,7 +566,7 @@ HWND Terminal::LocateWindow(const std::vector<HWND>& existing, DWORD& owner_pid)
     return nullptr;
 }
 
-void Terminal::WaitUntilReady(HWND hwnd)
+Terminal::Ready Terminal::WaitUntilReady(HWND hwnd)
 {
     // The readiness signal is the DRAG_BAR_WINDOW_CLASS child. That window is
     // created as part of the terminal's normal build-out, so its presence means
@@ -486,7 +580,7 @@ void Terminal::WaitUntilReady(HWND hwnd)
         if (!IsWindow(hwnd)) {
             log::Writef(L"ready: window vanished while waiting after %llums",
                         GetTickCount64() - started);
-            return;
+            return Ready::Vanished;
         }
 
         if (IsWindowVisible(hwnd) && MeasureChrome(hwnd) > 0) {
@@ -494,21 +588,27 @@ void Terminal::WaitUntilReady(HWND hwnd)
             // The drag bar can appear a frame before the first layout finishes.
             // Either way we are done waiting; Start re-checks released_ next.
             (void)PumpFor(120);
-            return;
+            return Ready::Settled;
         }
 
         if (!PumpFor(50) || released_) {
-            return;
+            return Ready::Settled;
         }
     }
 
     log::Writef(L"ready: TIMED OUT after %llums, visible=%d, dragBar=%dpx. Embedding anyway.",
                 GetTickCount64() - started, IsWindowVisible(hwnd) ? 1 : 0,
                 MeasureChrome(hwnd));
+    return Ready::TimedOut;
 }
 
 std::wstring Terminal::Embed(HWND child, DWORD owner_pid)
 {
+    if (!IsWindow(child)) {
+        return L"The terminal window closed before the dock could capture it, so the "
+               L"dock has nothing to show.";
+    }
+
     const LONG_PTR original_style = GetWindowLongPtrW(child, GWL_STYLE);
     const LONG_PTR original_ex = GetWindowLongPtrW(child, GWL_EXSTYLE);
 
@@ -664,6 +764,49 @@ void Terminal::Fit()
                  SWP_NOZORDER | SWP_NOACTIVATE | SWP_SHOWWINDOW);
 }
 
+int Terminal::LivePaneCount() const
+{
+    if (!terminal_ || !IsWindow(terminal_)) {
+        return -1;
+    }
+    return CountTerminalPanes(terminal_);
+}
+
+bool Terminal::IsFitted() const
+{
+    // Nothing to fit, or nothing to fit it against. Neither is drift.
+    if (!terminal_ || !IsWindow(terminal_)) {
+        return true;
+    }
+    if (GetParent(terminal_) != host_
+        || (GetWindowLongPtrW(terminal_, GWL_STYLE) & WS_CHILD) == 0) {
+        return false;
+    }
+
+    // Not measured yet means Fit() has not run since the embed, and Fit is the
+    // one that measures. Reporting drift here would only make it run early.
+    const int trim = cfg_.chrome_trim_px >= 0 ? cfg_.chrome_trim_px : chrome_trim_;
+    if (trim < 0) {
+        return true;
+    }
+
+    RECT client{};
+    if (!GetClientRect(host_, &client) || IsEmptyRect(client)) {
+        return true;
+    }
+
+    RECT current{};
+    if (!GetWindowRect(terminal_, &current)) {
+        return true;
+    }
+    // GetWindowRect is screen coordinates even for a child. Fit() placed the
+    // window in the host's client coordinates, so compare there.
+    MapWindowPoints(HWND_DESKTOP, host_, reinterpret_cast<POINT*>(&current), 2);
+
+    const RECT wanted{ 0, -trim, Width(client), Height(client) };
+    return current == wanted;
+}
+
 void Terminal::FocusTerminal()
 {
     if (!terminal_ || !IsWindow(terminal_)) {
@@ -702,7 +845,9 @@ void Terminal::CheckHealth()
         return;
     }
 
-    const bool immediate = (GetTickCount64() - embedded_at_) < kStartupFailureWindowMs;
+    const ULONGLONG lived_ms = GetTickCount64() - embedded_at_;
+    const bool immediate = lived_ms < kStartupFailureWindowMs;
+    log::Writef(L"health: %s gone after %llums", window_name_.c_str(), lived_ms);
     terminal_ = nullptr;
 
     if (cfg_.ParsedOnShellExit() == ShellExitAction::Quit) {

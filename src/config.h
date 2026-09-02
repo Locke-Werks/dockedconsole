@@ -129,14 +129,20 @@ struct Config {
     /// -p "New Session".
     [[nodiscard]] std::wstring TerminalArgsFor(const std::wstring& window_name) const;
 
+    /// The profile terminalArgs asks for with -p or --profile, empty for the
+    /// default. Read so the elevation decision can look at the profile Windows
+    /// Terminal is actually going to launch rather than guessing.
+    [[nodiscard]] std::wstring ProfileSelector() const;
+
     /// Pixels of terminal chrome hidden above the top of the dock. -1 measures
     /// Windows Terminal's tab strip at runtime, which is right at any DPI.
     int chrome_trim_px = -1;
 
     /// auto, never or always. Embedding reparents the terminal's window, and
     /// UIPI forbids that across integrity levels, so "auto" elevates only when
-    /// an elevated Windows Terminal is running and the window we are handed
-    /// would therefore be elevated too.
+    /// the window we are handed is going to be elevated: an elevated Windows
+    /// Terminal is already running, or the profile it will launch for us
+    /// carries "elevate": true.
     std::wstring elevation = L"auto";
 
     /// quit or relaunch. "quit" makes typing exit undock and close the whole

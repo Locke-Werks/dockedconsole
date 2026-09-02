@@ -47,5 +47,10 @@ void WriteBanner(const Config& cfg);
 /// "yes" / "no" / "unknown", for the tri-state elevation queries.
 [[nodiscard]] const wchar_t* Describe(int tristate);
 
+/// One line of at most `max` characters from a command line or a prompt: line
+/// breaks become spaces and anything past the limit is replaced by a count, so
+/// a briefing pasted into a command cannot turn the log into a transcript.
+[[nodiscard]] std::wstring Abbrev(std::wstring_view text, size_t max = 160);
+
 } // namespace log
 } // namespace dock

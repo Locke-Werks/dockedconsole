@@ -67,9 +67,12 @@ inline constexpr ULONG_PTR kSplitCopyDataId = 0x44434B31;   // 'DCK1'
 
 /// A request to run something in a new pane of one of our columns.
 ///
-/// Fixed header, then two NUL-terminated wide strings laid out after it. Every
-/// offset and length is in WCHARs and is checked against cbData before a single
-/// character is read: this arrives from a process we did not start.
+/// Fixed header, then the two wide strings laid out after it back to back, with
+/// no terminators: the lengths say where each ends. A terminator counted into a
+/// length is tolerated; an embedded NUL is refused, because CreateProcessW would
+/// cut the wt command line there. Offsets are bytes from the start of the block,
+/// lengths are in WCHARs, and every one of them is checked against cbData before
+/// a single character is read: this arrives from a process we did not start.
 struct SplitRequest {
     UINT32 version;      // 1
     UINT32 column_id;    // 0 means any column with room

@@ -29,6 +29,17 @@ namespace {
 
 constexpr UINT kRepositionDelayMs = 200;
 
+/// Fit timer ticks after a terminal starts, and after a pane is split into it.
+/// Both the terminal and the shell settle their own geometry after being sized,
+/// so the fit is re-applied a few times rather than once. A split gets more,
+/// because Windows Terminal's summon path moves the window some way into the
+/// split rather than at the start of it.
+constexpr int kFitTicksAfterStart = 6;
+constexpr int kFitTicksAfterSplit = 10;
+
+/// Drift corrections logged per column before the log line stops.
+constexpr int kMaxDriftLogs = 5;
+
 } // namespace
 
 DockWindow::DockWindow(Config cfg) : cfg_(std::move(cfg))
@@ -161,8 +172,15 @@ bool DockWindow::Create(HINSTANCE instance)
     // the shell this dock would otherwise have put there. Without this the
     // column looks empty and takes a full set of panes on top of the one it is
     // already running.
-    if (!first->initial_command.empty() || !first->initial_cwd.empty())
+    if (!first->initial_command.empty() || !first->initial_cwd.empty()) {
         first->foreign_panes = 1;
+        first->own_pane_counted = true;
+        log::Writef(L"column: #%d starts as %s in %s", first->id,
+                    first->initial_command.empty()
+                        ? L"(shell)"
+                        : log::Abbrev(first->initial_command).c_str(),
+                    first->initial_cwd.empty() ? L"(no directory)" : first->initial_cwd.c_str());
+    }
     LayoutColumns();
     StartColumn(first->id);
 
@@ -280,9 +298,17 @@ void DockWindow::StartColumn(int id)
     // and the column is looked up again rather than reusing `column`.
     DrainPendingSplits(id);
 
-    // Both the terminal and the shell settle their own geometry after being
-    // sized, so the fit is re-applied a few times rather than once.
+    if (Column* started = FindColumn(id); started && started->terminal) {
+        started->seen_hwnd = started->terminal->Hwnd();
+    }
+
+    ArmFit(kFitTicksAfterStart);
+}
+
+void DockWindow::ArmFit(int ticks)
+{
     fit_ticks_ = 0;
+    fit_ticks_target_ = ticks;
     SetTimer(hwnd_, kTimerFit, 250, nullptr);
 }
 
@@ -332,10 +358,23 @@ LRESULT DockWindow::OnSplitRequest(const COPYDATASTRUCT& data)
         return kSplitRejected;
     }
 
-    const std::wstring cwd(reinterpret_cast<const wchar_t*>(base + header.cwd_offset),
-                           header.cwd_length);
-    const std::wstring command(reinterpret_cast<const wchar_t*>(base + header.cmd_offset),
-                               header.cmd_length);
+    std::wstring cwd(reinterpret_cast<const wchar_t*>(base + header.cwd_offset),
+                     header.cwd_length);
+    std::wstring command(reinterpret_cast<const wchar_t*>(base + header.cmd_offset),
+                         header.cmd_length);
+
+    // A sender that counted its terminator into a length is forgiven. One that
+    // embedded a NUL is not: CreateProcessW would cut the wt line there and run
+    // whatever was in front of it, which is not the request that was made.
+    for (std::wstring* text : { &cwd, &command }) {
+        if (!text->empty() && text->back() == L'\0') {
+            text->pop_back();
+        }
+        if (text->find(L'\0') != std::wstring::npos) {
+            log::Write(L"split: refused, a string carries an embedded NUL");
+            return kSplitRejected;
+        }
+    }
 
     // An empty command asks for a pane running the profile's own shell, which
     // is a legitimate request as long as it says where to open it. One carrying
@@ -344,21 +383,24 @@ LRESULT DockWindow::OnSplitRequest(const COPYDATASTRUCT& data)
         return kSplitRejected;
     }
 
-    // Pick a column: the one asked for if it has room, else any with room.
-    Column* target = nullptr;
-    if (header.column_id != 0) {
-        Column* asked = FindColumn(static_cast<int>(header.column_id));
-        if (asked && asked->foreign_panes < kMaxForeignPanesPerColumn) {
-            target = asked;
-        }
-    }
+    Column* target = PickColumnWithRoom(header.column_id);
     if (!target) {
+        // Every column looks full. The count only ever rises on its own, so
+        // before giving up a strip of desktop to another column, ask each
+        // terminal how many panes it is really showing. By id, because the
+        // walk into the terminal's process dispatches messages here meanwhile.
+        std::vector<int> ids;
+        ids.reserve(columns_.size());
         for (const auto& column : columns_) {
-            if (column->foreign_panes < kMaxForeignPanesPerColumn) {
-                target = column.get();
-                break;
+            ids.push_back(column->id);
+        }
+        for (const int id : ids) {
+            ReconcilePaneCount(id);
+            if (shutting_down_) {
+                return kSplitNotHandled;
             }
         }
+        target = PickColumnWithRoom(header.column_id);
     }
 
     LRESULT answer = kSplitAccepted;
@@ -386,7 +428,10 @@ LRESULT DockWindow::OnSplitRequest(const COPYDATASTRUCT& data)
         target->initial_cwd = cwd;
         target->initial_command = command;
         ++target->foreign_panes;
-        log::Writef(L"split: #%d will start as the requested command", target->id);
+        target->own_pane_counted = true;
+        log::Writef(L"split: #%d will start as %s in %s", target->id,
+                    command.empty() ? L"(shell)" : log::Abbrev(command).c_str(),
+                    cwd.empty() ? L"(no directory)" : cwd.c_str());
         return answer;
     }
 
@@ -403,9 +448,135 @@ LRESULT DockWindow::OnSplitRequest(const COPYDATASTRUCT& data)
         return kSplitNotHandled;
     }
 
-    log::Writef(L"split: accepted for #%d, now %d foreign panes", target->id,
-                target->foreign_panes);
+    log::Writef(L"split: accepted for #%d, now %d foreign panes, run=%s in %s", target->id,
+                target->foreign_panes,
+                command.empty() ? L"(shell)" : log::Abbrev(command).c_str(),
+                cwd.empty() ? L"(no directory)" : cwd.c_str());
     return answer;
+}
+
+DockWindow::Column* DockWindow::PickColumnWithRoom(UINT32 asked_id)
+{
+    if (asked_id != 0) {
+        Column* asked = FindColumn(static_cast<int>(asked_id));
+        if (asked && asked->foreign_panes < kMaxForeignPanesPerColumn) {
+            return asked;
+        }
+    }
+    for (const auto& column : columns_) {
+        if (column->foreign_panes < kMaxForeignPanesPerColumn) {
+            return column.get();
+        }
+    }
+    return nullptr;
+}
+
+void DockWindow::ReconcilePaneCount(int column_id)
+{
+    Column* column = FindColumn(column_id);
+    if (!column || !column->terminal || column->foreign_panes == 0) {
+        return;
+    }
+    if (reconciling_) {
+        // A request that arrived from inside another column's walk. It gets
+        // the count as it stands, which is what every request got before.
+        return;
+    }
+
+    reconciling_ = true;
+    const int live = column->terminal->LivePaneCount();
+    reconciling_ = false;
+
+    // The walk went into another process and dispatched sent messages here
+    // while it waited, so nothing found before it is trusted after it.
+    if (shutting_down_) {
+        return;
+    }
+    column = FindColumn(column_id);
+    if (!column) {
+        return;
+    }
+
+    if (live < 0) {
+        log::Writef(L"reconcile: #%d live pane count unavailable, keeping %d", column_id,
+                    column->foreign_panes);
+        return;
+    }
+
+    // Panes accepted but not yet split are not on screen yet and still count.
+    int pending = 0;
+    for (const PendingSplit& split : pending_splits_) {
+        if (split.id == column_id) {
+            ++pending;
+        }
+    }
+
+    // A column that started as a shell has one pane of its own that is not in
+    // the count; a column another program asked for counts its first pane.
+    const int own = column->own_pane_counted ? 0 : 1;
+    const int seen = (std::max)(0, live - own + pending);
+
+    if (seen >= column->foreign_panes) {
+        log::Writef(L"reconcile: #%d live=%d agrees with %d foreign", column_id, live,
+                    column->foreign_panes);
+        return;
+    }
+
+    log::Writef(L"reconcile: #%d live=%d own=%s pending=%d, foreign %d -> %d", column_id, live,
+                column->own_pane_counted ? L"counted" : L"uncounted", pending,
+                column->foreign_panes, seen);
+    column->foreign_panes = seen;
+}
+
+void DockWindow::ResetPaneCount(Column& column, const wchar_t* why)
+{
+    int fresh = column.own_pane_counted ? 1 : 0;
+    for (const PendingSplit& split : pending_splits_) {
+        if (split.id == column.id) {
+            ++fresh;
+        }
+    }
+    if (column.foreign_panes == fresh) {
+        return;
+    }
+    log::Writef(L"panes: #%d reset from %d to %d, %s", column.id, column.foreign_panes, fresh,
+                why);
+    column.foreign_panes = fresh;
+}
+
+void DockWindow::WatchTerminal(Column& column)
+{
+    const HWND current = column.terminal->Hwnd();
+
+    if (current != column.seen_hwnd) {
+        column.seen_hwnd = current;
+        column.drift_corrections = 0;
+        if (!current) {
+            return; // gone; the column's own close handler takes it from here
+        }
+
+        // A relaunched terminal is a fresh window: the enforcer's list names
+        // the old one, the fit has never run against this one, and whatever
+        // panes were added to the old one closed with it.
+        log::Writef(L"column: #%d has a new terminal window, hwnd=0x%p", column.id, current);
+        PublishOwnedWindows();
+        ArmFit(kFitTicksAfterStart);
+        ResetPaneCount(column, L"the terminal was relaunched");
+        DrainPendingSplits(column.id);
+        return;
+    }
+
+    if (!current || column.terminal->IsFitted()) {
+        return;
+    }
+
+    if (column.drift_corrections < kMaxDriftLogs) {
+        log::Writef(L"fit: #%d drifted, re-fitting", column.id);
+    } else if (column.drift_corrections == kMaxDriftLogs) {
+        log::Writef(L"fit: #%d keeps drifting; correcting silently from here", column.id);
+    }
+    ++column.drift_corrections;
+    column.terminal->Fit();
 }
 
 void DockWindow::OnSplitRun(int column_id)
@@ -456,8 +627,10 @@ void DockWindow::DrainPendingSplits(int column_id)
         // A split can move the embedded window: Windows Terminal's summon path
         // touches placement, and placement on a WS_CHILD is read in the parent's
         // coordinates. Re-fitting costs nothing and puts the chrome trim back if
-        // it did.
-        SetTimer(hwnd_, kTimerFit, 250, nullptr);
+        // it did. From the start of the count, or a split that lands after the
+        // start-up ticks have run out gets one re-fit, 250ms in, before the
+        // window has moved.
+        ArmFit(kFitTicksAfterSplit);
     }
 }
 
@@ -867,7 +1040,7 @@ LRESULT DockWindow::WndProc(UINT msg, WPARAM wparam, LPARAM lparam)
                 return 0;
             }
             FitColumns();
-            if (++fit_ticks_ >= 6) {
+            if (++fit_ticks_ >= fit_ticks_target_) {
                 KillTimer(hwnd_, kTimerFit);
             }
             return 0;
@@ -890,8 +1063,19 @@ LRESULT DockWindow::WndProc(UINT msg, WPARAM wparam, LPARAM lparam)
                     return 0;
                 }
                 Column* column = FindColumn(id);
+                if (!column || !column->terminal) {
+                    continue;
+                }
+                column->terminal->CheckHealth();
+
+                // CheckHealth can start a replacement terminal, which pumps, so
+                // the column is looked up again before anything touches it.
+                if (shutting_down_) {
+                    return 0;
+                }
+                column = FindColumn(id);
                 if (column && column->terminal) {
-                    column->terminal->CheckHealth();
+                    WatchTerminal(*column);
                 }
             }
             DrainRetiredColumns();
@@ -1114,14 +1298,23 @@ void DockWindow::OnMenuCommand(UINT command)
         }
         const int id = column->id;
         column->terminal->Restart();
-        if (shutting_down_ || !FindColumn(id)) {
+        if (shutting_down_) {
             break; // Restart pumps too, so re-check on the way out
+        }
+        column = FindColumn(id);
+        if (!column || !column->terminal) {
+            break;
         }
         // The old HWND is gone. Without this the enforcer keeps filtering
         // against a destroyed handle and stops recognising its own children.
+        column->seen_hwnd = column->terminal->Hwnd();
+        column->drift_corrections = 0;
         PublishOwnedWindows();
-        fit_ticks_ = 0;
-        SetTimer(hwnd_, kTimerFit, 250, nullptr);
+        ArmFit(kFitTicksAfterStart);
+        // A fresh terminal holds nothing anyone added to the old one, which is
+        // what makes this the way back from a column that looks full.
+        ResetPaneCount(*column, L"the shell was restarted");
+        DrainPendingSplits(id);
         break;
     }
     case kMenuReloadConfig:

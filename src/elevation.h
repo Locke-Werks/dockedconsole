@@ -54,15 +54,29 @@ inline constexpr wchar_t kRelaunchFlag[] = L"--elevated-relaunch";
 [[nodiscard]] int IsProcessElevated(DWORD pid);
 
 /// True when a Windows Terminal process is running elevated. Any such process
-/// can be the monarch that services our window request.
-[[nodiscard]] bool AnyElevatedTerminalRunning();
+/// can be the monarch that services our window request. The pid of the first
+/// one found is reported when asked, for the log.
+[[nodiscard]] bool AnyElevatedTerminalRunning(DWORD* pid = nullptr);
 
-[[nodiscard]] bool ShouldElevate(const Config& cfg);
+/// What to do about integrity levels before a window is opened.
+///
+/// The window we are about to be handed is going to be elevated in two cases:
+/// an elevated Windows Terminal is already running and will service the
+/// request, or the profile Windows Terminal is going to launch for us carries
+/// "elevate": true, in which case it opens the tab in an elevated instance and
+/// closes the window it opened first. Either way an unelevated dock cannot
+/// capture the result, so under "auto" it relaunches itself elevated and under
+/// "never" it refuses up front rather than opening a window it can never take.
+struct ElevationDecision {
+    bool elevate = false;
+    bool blocked = false;
 
-/// True when the dock cannot work but the configuration forbids fixing it.
-/// Checked so the refusal happens before a terminal window is opened that could
-/// never be captured.
-[[nodiscard]] bool BlockedByPolicy(const Config& cfg);
+    /// Why the window would be elevated, for the log and the refusal dialog.
+    /// Empty when nothing requires it.
+    std::wstring reason;
+};
+
+[[nodiscard]] ElevationDecision DecideElevation(const Config& cfg);
 
 /// Restarts this executable elevated, passing the original arguments through.
 /// False if the user declined the prompt, which is a decision rather than an

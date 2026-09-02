@@ -16,6 +16,7 @@
 
 #include "config.h"
 #include "win32.h"
+#include "wt_settings.h"
 
 #include <shellapi.h>
 #include <tlhelp32.h>
@@ -94,7 +95,7 @@ int IsProcessElevated(DWORD pid)
     return elevated ? 1 : 0;
 }
 
-bool AnyElevatedTerminalRunning()
+bool AnyElevatedTerminalRunning(DWORD* pid)
 {
     Handle snapshot(CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0));
     if (!snapshot) {
@@ -110,6 +111,9 @@ bool AnyElevatedTerminalRunning()
     do {
         if (EqualsNoCase(entry.szExeFile, L"WindowsTerminal.exe")
             && IsProcessElevated(entry.th32ProcessID) == 1) {
+            if (pid) {
+                *pid = entry.th32ProcessID;
+            }
             return true;
         }
     } while (Process32NextW(snapshot.Get(), &entry));
@@ -117,25 +121,53 @@ bool AnyElevatedTerminalRunning()
     return false;
 }
 
-bool ShouldElevate(const Config& cfg)
+ElevationDecision DecideElevation(const Config& cfg)
 {
+    ElevationDecision decision;
     if (IsCurrentProcessElevated()) {
-        return false;
+        return decision;
     }
 
-    switch (cfg.ParsedElevation()) {
-    case ElevationPolicy::Always: return true;
-    case ElevationPolicy::Never:  return false;
-    case ElevationPolicy::Auto:   break;
+    const ElevationPolicy policy = cfg.ParsedElevation();
+    if (policy == ElevationPolicy::Always) {
+        decision.elevate = true;
+        decision.reason = L"\"elevation\" is \"always\"";
+        return decision;
     }
-    return AnyElevatedTerminalRunning();
-}
 
-bool BlockedByPolicy(const Config& cfg)
-{
-    return cfg.ParsedElevation() == ElevationPolicy::Never
-        && !IsCurrentProcessElevated()
-        && AnyElevatedTerminalRunning();
+    // A running elevated terminal decides it on its own: every new window is
+    // born inside whichever monarch already exists. Only with none running does
+    // the profile get a say, because that is when wt starts a fresh instance
+    // and reads the profile to decide what kind.
+    DWORD elevated_pid = 0;
+    if (AnyElevatedTerminalRunning(&elevated_pid)) {
+        decision.reason = L"an elevated Windows Terminal is already running (pid "
+                          + std::to_wstring(elevated_pid) + L")";
+    } else {
+        const ProfileElevation column = PredictProfileElevation(cfg, ProfileTarget::Column);
+        if (column.elevates == 1) {
+            decision.reason = DescribeProfileElevation(column);
+        } else if (!cfg.terminal_profile.empty()) {
+            // A pane profile that elevates cannot join an unelevated window
+            // either: Windows Terminal would open it in a new elevated window
+            // instead, and every pane request would land there.
+            const ProfileElevation pane = PredictProfileElevation(cfg, ProfileTarget::Pane);
+            if (pane.elevates == 1) {
+                decision.reason = DescribeProfileElevation(pane);
+            }
+        }
+    }
+
+    if (decision.reason.empty()) {
+        return decision;
+    }
+
+    if (policy == ElevationPolicy::Auto) {
+        decision.elevate = true;
+    } else {
+        decision.blocked = true;
+    }
+    return decision;
 }
 
 bool Relaunch(const std::vector<std::wstring>& args, std::wstring& message)

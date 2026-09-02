@@ -17,9 +17,11 @@
 #include "config.h"
 #include "elevation.h"
 #include "win32.h"
+#include "wt_settings.h"
 
 #include <tlhelp32.h>
 
+#include <algorithm>
 #include <cstdarg>
 #include <cwchar>
 #include <mutex>
@@ -158,6 +160,21 @@ const wchar_t* Describe(int tristate)
     return L"unknown";
 }
 
+std::wstring Abbrev(std::wstring_view text, size_t max)
+{
+    const size_t keep = (std::min)(text.size(), max);
+
+    std::wstring out;
+    out.reserve(keep + 24);
+    for (const wchar_t c : text.substr(0, keep)) {
+        out.push_back((c == L'\r' || c == L'\n') ? L' ' : c);
+    }
+    if (text.size() > keep) {
+        out += L"... (+" + std::to_wstring(text.size() - keep) + L" chars)";
+    }
+    return out;
+}
+
 void WriteBanner(const Config& cfg)
 {
     Write(std::wstring(72, L'-'));
@@ -168,6 +185,19 @@ void WriteBanner(const Config& cfg)
     Writef(L"  terminal args  %s", cfg.terminal_args.c_str());
     Writef(L"  edge/width     %s %dpx  elevation=%s",
            cfg.edge.c_str(), cfg.width_physical_px, cfg.elevation.c_str());
+
+    // The profile Windows Terminal is going to launch, and whether it elevates.
+    // That is the fact the elevation decision rests on when no terminal is
+    // running yet, so it goes in the banner rather than being reconstructed
+    // from a failed embed afterwards.
+    const ProfileElevation column = PredictProfileElevation(cfg, ProfileTarget::Column);
+    Writef(L"  wt settings    %s",
+           column.settings_path.empty() ? L"(none found)" : column.settings_path.c_str());
+    Writef(L"  wt profile     %s", DescribeProfileElevation(column).c_str());
+    if (!cfg.terminal_profile.empty()) {
+        const ProfileElevation pane = PredictProfileElevation(cfg, ProfileTarget::Pane);
+        Writef(L"  pane profile   %s", DescribeProfileElevation(pane).c_str());
+    }
     Writef(L"  block          fullscreen=%d taskbar=%d topmost=%d",
            cfg.block_fullscreen ? 1 : 0, cfg.push_taskbar ? 1 : 0,
            cfg.topmost ? 1 : 0);

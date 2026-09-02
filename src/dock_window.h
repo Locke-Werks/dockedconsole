@@ -88,16 +88,32 @@ private:
         std::wstring window_name;
 
         /// Panes added on another program's behalf, on top of the shell this
-        /// dock started. Best effort and it only ever over-counts: a pane the
-        /// user closes by hand is invisible from here, exactly as it is to
-        /// everyone else, because Windows Terminal publishes no pane count.
-        /// "Restart shell" on the column is the way back.
+        /// dock started. Counted up on every accepted request, because nothing
+        /// tells us when a pane closes, and checked against what the terminal
+        /// is really showing only when it reaches the cap: see
+        /// ReconcilePaneCount. "Restart shell" resets it.
         int foreign_panes = 0;
+
+        /// True when the column's own first pane is included in foreign_panes,
+        /// which it is whenever another program asked for the column: the
+        /// terminal it starts with is that program's pane, not a shell of ours.
+        bool own_pane_counted = false;
 
         /// What this column's own terminal should run instead of a shell. Set
         /// before its terminal starts, and only then.
         std::wstring initial_cwd;
         std::wstring initial_command;
+
+        /// The terminal window the health tick last saw, so a relaunch under
+        /// onShellExit: relaunch is noticed and the new window gets fitted,
+        /// published to the enforcer and its pane count started afresh.
+        HWND seen_hwnd = nullptr;
+
+        /// Drift corrections logged so far. The correction keeps happening; the
+        /// log line stops after a few, or a terminal that fights back would
+        /// fill the log once a second.
+        int drift_corrections = 0;
+
         /// Why the terminal went, if it went badly. Read once, by the handler
         /// that takes the column down.
         std::wstring failure;
@@ -133,6 +149,29 @@ private:
     [[nodiscard]] LRESULT OnSplitRequest(const COPYDATASTRUCT& data);
     void OnSplitRun(int column_id);
     void DrainPendingSplits(int column_id);
+
+    /// The column a pane request should land in: the one it asked for when that
+    /// has room, else the first with room, else null.
+    [[nodiscard]] Column* PickColumnWithRoom(UINT32 asked_id);
+
+    /// Lowers a column's pane count to what its terminal is actually showing.
+    ///
+    /// The count only ever rises on its own, so a column whose panes were closed
+    /// by hand looks full forever and every later request opens a new column.
+    /// Asking the terminal costs a cross-process UI Automation walk, so this
+    /// runs only when a column is about to be treated as full.
+    void ReconcilePaneCount(int column_id);
+
+    /// Puts the count back to what a freshly started terminal holds: its own
+    /// pane when that was requested, plus anything still queued for it.
+    void ResetPaneCount(Column& column, const wchar_t* why);
+
+    /// The health tick's look at one column's terminal: notices a relaunched
+    /// window, and re-fits one that has drifted.
+    void WatchTerminal(Column& column);
+
+    /// Re-applies the fit for the next `ticks` timer ticks.
+    void ArmFit(int ticks);
 
     void StartColumn(int id);
     void OnColumnGone(int id);
@@ -236,6 +275,7 @@ private:
     HBRUSH background_ = nullptr;
 
     int fit_ticks_ = 0;
+    int fit_ticks_target_ = 0;
 
     Handle stop_event_;
     Handle stop_quit_event_;
@@ -244,6 +284,11 @@ private:
     bool shutting_down_ = false;
     bool torn_down_ = false;
     bool repositioning_ = false;
+
+    /// True while a pane count is being taken. The walk calls into the
+    /// terminal's process, which dispatches sent messages here meanwhile, and a
+    /// second request arriving inside the first must not start a second walk.
+    bool reconciling_ = false;
 };
 
 } // namespace dock

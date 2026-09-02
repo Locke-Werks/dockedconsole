@@ -150,6 +150,12 @@ private:
 
 [[nodiscard]] bool FileExists(const std::wstring& path);
 
+/// Reads a UTF-8 file into UTF-16, dropping a BOM. False on any failure, which
+/// callers treat as unreadable rather than as an empty file. Capped at 8 MB,
+/// because nothing this program reads is larger and a file that is was not
+/// written by anyone who meant it for us.
+[[nodiscard]] bool ReadUtf8File(const std::wstring& path, std::wstring& out);
+
 /// Creates every missing directory along `path`. True if the directory exists
 /// afterwards, whether or not this call is what created it.
 bool EnsureDirectory(const std::wstring& path);
