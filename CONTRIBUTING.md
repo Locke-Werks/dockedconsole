@@ -140,6 +140,20 @@ re-check the table at the bottom of the README, in particular:
    nothing that was already on screen; a fourth is refused with exit code 5.
    Typing `exit` in a middle column re-tiles the survivors with no seam, and the
    last column to close takes the dock down and restores the work area.
+8. With no `WindowsTerminal.exe` running and a default profile that carries
+   `"elevate": true`, `elevation: "auto"` relaunches elevated before opening a
+   window and the log shows `embed: ok` on the first attempt with no `vanished`
+   line; `elevation: "never"` refuses up front and the dialog names the profile.
+   `--explain-elevation` prints the same decision. Setting
+   `DOCKEDCONSOLE_NO_PROFILE_CHECK=1` in the environment disables the profile
+   check, which is how the recovery path is exercised on a machine where the
+   prediction is right: the log then shows `vanish: replaced by` and
+   `vanish: cause:`, and the dialog names the cause.
+9. With a dock up, `dockedconsole.exe --pane-dir <dir> --pane-run "cmd /c exit"`
+   four times in a row exits 0 each time and the fourth logs
+   `reconcile: #1 live=1 ... foreign 3 -> 0` followed by an accepted split into
+   the same column, not `column: added #2`. The same flags with no dock running
+   start one whose first column runs the command.
 
 Cold start and warm start are different code paths in `terminal.cpp`, and
 historically only the cold one was broken. Test both: with no

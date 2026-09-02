@@ -82,6 +82,7 @@ forever.
 dockedconsole.exe                     # dock, or add a column if already docked
 dockedconsole.exe --stop              # undock and exit
 dockedconsole.exe --reclaim           # recover after a hard kill
+dockedconsole.exe --explain-elevation # would it elevate, and why
 dockedconsole.exe --help              # the rest
 
 dockedconsole.exe --width 900         # try a width without saving it
@@ -90,10 +91,14 @@ dockedconsole.exe --edge left         # try the other side
 dockedconsole.exe --pane-dir C:\src\thing --pane-run "claude --effort max"
 ```
 
-`--pane-dir` and `--pane-run` make the first column start as that command in
-that directory rather than as a shell. They are independent: a directory on its
-own is an ordinary shell that opens in the right place. Like `--width` and
-`--edge` they are read only by the first instance and never saved.
+`--pane-dir` and `--pane-run` ask for a pane. When they start the dock, the
+first column starts as that command in that directory rather than as a shell.
+When a dock is already up, they ask it for a pane the same way another program
+would: a column with room takes a split, a full column gets a new column, and
+the exit code says which (0 added, 5 refused, 6 window naming is off, 2 no
+answer). They are independent: a directory on its own is an ordinary shell that
+opens in the right place. Nothing here is saved. `--width` and `--edge` are read
+by the first instance only.
 
 ### Columns
 
@@ -298,10 +303,19 @@ behaviour that already worked.
 owned by an elevated one. Because new terminal windows are born inside whichever
 monarch already exists, *one* elevated terminal anywhere means the window you are
 handed is elevated, `SetParent` fails, and the terminal is left floating with the
-dock empty beside it. So `elevation: "auto"` checks for an elevated Windows
-Terminal at startup and relaunches itself elevated only when that is the case. On
-a machine with no elevated terminal, nothing elevates and nothing prompts. Set it
-to `never` if you would rather be told than helped.
+dock empty beside it. The same happens with no terminal running at all when the
+profile Windows Terminal launches carries `"elevate": true`: it opens the tab in
+an elevated instance of itself and closes the window it opened first, so the
+window the dock was waiting on vanishes and its replacement is out of reach. So
+`elevation: "auto"` checks for both at startup, an elevated Windows Terminal
+already running and the `elevate` setting on the profile it will use (the one
+`-p` in `terminalArgs` names, or the default profile, with `terminalProfile`
+checked as well, and `profiles.defaults` as the fallback), and relaunches itself
+elevated only when one of them says the window is going to be elevated. On a
+machine where neither is true, nothing elevates and nothing prompts. Set it to
+`never` if you would rather be told than helped: the refusal names the profile.
+`--explain-elevation` prints the same decision without starting anything, and
+the log records it every time.
 
 **The notification area's overflow opens in the ordinary z-order band, which
 means a topmost dock hides it.** The panel behind the chevron is not a topmost
@@ -340,9 +354,12 @@ SendMessageTimeoutW(dock, WM_COPYDATA, 0, reinterpret_cast<LPARAM>(&data),
                     SMTO_ABORTIFHUNG | SMTO_ERRORONEXIT, 5000, &answer);
 ```
 
-The block is `SplitRequest` from `src/ids.h` followed by two NUL-terminated wide
-strings. Offsets are bytes from the start of the block, lengths are in WCHARs,
-and every one of them is checked against `cbData` before a character is read.
+The block is `SplitRequest` from `src/ids.h` followed by the two wide strings,
+back to back and without terminators: the lengths say where each ends, and a
+terminator counted into a length is tolerated. Offsets are bytes from the start
+of the block, lengths are in WCHARs, and every one of them is checked against
+`cbData` before a character is read. A string with a NUL inside it is refused,
+since `CreateProcessW` would cut the `wt` command line there.
 
 The two strings are independent. A command with no directory is that command
 wherever the profile starts; a directory with no command is an ordinary shell
@@ -373,9 +390,16 @@ levels fine.
 
 Three panes per column is the cap, `kMaxForeignPanesPerColumn` in
 `src/config.h`. A column started with `--pane-run` counts its own first pane
-against that, so it takes two more. The count only ever runs high: a pane closed
-by hand is invisible from here, because Windows Terminal publishes no pane count
-anywhere. "Restart shell" on the column clears it.
+against that, so it takes two more. The count goes up on every accepted request
+and nothing tells the dock when a pane closes, so it can only run high. Before a
+column is treated as full, the dock asks the terminal how many panes it is
+really showing, through UI Automation, and lowers the count to match; only the
+active tab's visible panes are counted, so that check can only ever lower it,
+never raise it. "Restart shell" on the column resets it outright.
+
+Every request is logged in `%LOCALAPPDATA%\DockedConsole\dockedconsole.log`
+with the directory, the command and the exact `wt` line that ran, which is where
+to look when a pane appears and dies, or does not appear at all.
 
 ## What it cannot do
 
