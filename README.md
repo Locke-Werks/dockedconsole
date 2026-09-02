@@ -317,6 +317,15 @@ machine where neither is true, nothing elevates and nothing prompts. Set it to
 `--explain-elevation` prints the same decision without starting anything, and
 the log records it every time.
 
+One measured detail behind that: Windows Terminal applies `elevate` to the
+profile's own command line. A window or pane handed a command of its own on the
+`wt` command line stays at the launcher's level, so a column started with
+`--pane-run` used to come up unelevated and work, while a plain start of the
+same dock elevated and failed. The dock elevates for the profile either way,
+because the shell panes asked for later carry no command and Windows Terminal
+will not put an elevated pane inside an unelevated window: it opens a separate
+elevated window for it, and the dock never sees that pane at all.
+
 **The notification area's overflow opens in the ordinary z-order band, which
 means a topmost dock hides it.** The panel behind the chevron is not a topmost
 window and never needed to be: it opens *above* the taskbar rather than over it,

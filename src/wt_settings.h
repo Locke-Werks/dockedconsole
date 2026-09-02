@@ -33,6 +33,15 @@ enum class ProfileTarget { Column, Pane };
 /// it opened first, so an unelevated dock that launched it finds its window gone
 /// and its replacement out of reach. Reading the setting up front is the only
 /// way to know that before a window has been opened that cannot be captured.
+///
+/// Measured, not assumed: the setting applies to the profile's own command
+/// line. A window or pane given a command of its own on the wt command line
+/// stays at the launcher's level, while one given only a directory, or
+/// nothing, elevates. The prediction still follows the profile even for a
+/// column that starts as a command, because the shell panes asked for later
+/// carry no command, and Windows Terminal will not put an elevated pane inside
+/// an unelevated window: it opens a new elevated window for it instead, and
+/// the dock never sees that pane at all.
 struct ProfileElevation {
     /// 1 when the profile elevates, 0 when it does not, -1 when that could not
     /// be determined. `detail` says why when it is -1.
