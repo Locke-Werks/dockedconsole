@@ -14,6 +14,10 @@
 
 ---
 
+[![Docked Console demo](https://img.youtube.com/vi/X_lF4xEEDyM/maxresdefault.jpg)](https://www.youtube.com/watch?v=X_lF4xEEDyM)
+
+*Demo: a terminal docked to the edge of the Windows desktop (1:27)*
+
 You know the drill. You snap a terminal to the right edge. It looks great for
 about eleven seconds. Then you maximize a browser and Windows cheerfully paints
 straight over it, because as far as the shell is concerned that terminal is just
