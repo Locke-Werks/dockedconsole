@@ -167,19 +167,23 @@ bool DockWindow::Create(HINSTANCE instance)
     // one thing gets that thing in a pane underneath a shell it did not ask for.
     first->initial_cwd = cfg_.initial_pane_cwd;
     first->initial_command = cfg_.initial_pane_command;
+    first->initial_profile = cfg_.initial_pane_profile;
 
     // Counted, because that terminal is one of the caller's panes rather than
     // the shell this dock would otherwise have put there. Without this the
     // column looks empty and takes a full set of panes on top of the one it is
     // already running.
-    if (!first->initial_command.empty() || !first->initial_cwd.empty()) {
+    if (!first->initial_command.empty() || !first->initial_cwd.empty()
+        || !first->initial_profile.empty()) {
         first->foreign_panes = 1;
         first->own_pane_counted = true;
-        log::Writef(L"column: #%d starts as %s in %s", first->id,
+        log::Writef(L"column: #%d starts as %s in %s, profile %s", first->id,
                     first->initial_command.empty()
                         ? L"(shell)"
                         : log::Abbrev(first->initial_command).c_str(),
-                    first->initial_cwd.empty() ? L"(no directory)" : first->initial_cwd.c_str());
+                    first->initial_cwd.empty() ? L"(no directory)" : first->initial_cwd.c_str(),
+                    first->initial_profile.empty() ? L"(default)"
+                                                   : first->initial_profile.c_str());
     }
     LayoutColumns();
     StartColumn(first->id);
@@ -276,8 +280,10 @@ void DockWindow::StartColumn(int id)
     }
 
     column->terminal = std::make_unique<Terminal>(column->panel, cfg_, column->window_name);
-    if (!column->initial_command.empty() || !column->initial_cwd.empty())
-        column->terminal->SetInitialCommand(column->initial_cwd, column->initial_command);
+    if (!column->initial_command.empty() || !column->initial_cwd.empty()
+        || !column->initial_profile.empty())
+        column->terminal->SetInitialCommand(column->initial_cwd, column->initial_command,
+                                            column->initial_profile);
     column->terminal->on_fault = [this](const std::wstring& message) {
         tray_.Notify(message);
     };
@@ -332,41 +338,63 @@ LRESULT DockWindow::OnSplitRequest(const COPYDATASTRUCT& data)
     // Everything below is validated before a single character is read. This
     // arrives from a process we did not start, the pointer is only valid for
     // the duration of this call, and cbData is the only thing bounding it.
-    if (data.cbData < sizeof(SplitRequest) || !data.lpData) {
+    if (data.cbData < kSplitRequestV1Size || !data.lpData) {
         return kSplitRejected;
     }
 
-    SplitRequest header{};
-    memcpy(&header, data.lpData, sizeof(header));
-    if (header.version != kSplitRequestVersion) {
-        log::Writef(L"split: refused, request version %u", header.version);
+    // The version is the first field, so it can be read before knowing how
+    // long the header is.
+    UINT32 version = 0;
+    memcpy(&version, data.lpData, sizeof(version));
+    size_t header_size = 0;
+    if (version == 1) {
+        header_size = kSplitRequestV1Size;
+    } else if (version == kSplitRequestVersion) {
+        header_size = sizeof(SplitRequest);
+    } else {
+        log::Writef(L"split: refused, request version %u", version);
         return kSplitRejected;
     }
+    if (data.cbData < header_size) {
+        return kSplitRejected;
+    }
+
+    SplitRequest header{};   // a v1 header leaves the profile fields zero
+    memcpy(&header, data.lpData, header_size);
 
     const auto* base = static_cast<const char*>(data.lpData);
     const auto within = [&](UINT32 offset, UINT32 length) {
-        // Lengths are in WCHARs, and the string must carry its terminator.
+        // Lengths are in WCHARs. An empty string is not read, so it may sit
+        // anywhere.
+        if (length == 0) {
+            return true;
+        }
         const size_t bytes = static_cast<size_t>(length) * sizeof(wchar_t);
-        if (offset < sizeof(SplitRequest) || bytes > data.cbData) {
+        if (offset < header_size || bytes > data.cbData) {
             return false;
         }
         return static_cast<size_t>(offset) + bytes <= data.cbData;
     };
 
     if (!within(header.cwd_offset, header.cwd_length)
-        || !within(header.cmd_offset, header.cmd_length)) {
+        || !within(header.cmd_offset, header.cmd_length)
+        || !within(header.profile_offset, header.profile_length)) {
         return kSplitRejected;
     }
 
-    std::wstring cwd(reinterpret_cast<const wchar_t*>(base + header.cwd_offset),
-                     header.cwd_length);
-    std::wstring command(reinterpret_cast<const wchar_t*>(base + header.cmd_offset),
-                         header.cmd_length);
+    const auto read = [&](UINT32 offset, UINT32 length) {
+        return length == 0
+                   ? std::wstring()
+                   : std::wstring(reinterpret_cast<const wchar_t*>(base + offset), length);
+    };
+    std::wstring cwd = read(header.cwd_offset, header.cwd_length);
+    std::wstring command = read(header.cmd_offset, header.cmd_length);
+    std::wstring profile = read(header.profile_offset, header.profile_length);
 
     // A sender that counted its terminator into a length is forgiven. One that
     // embedded a NUL is not: CreateProcessW would cut the wt line there and run
     // whatever was in front of it, which is not the request that was made.
-    for (std::wstring* text : { &cwd, &command }) {
+    for (std::wstring* text : { &cwd, &command, &profile }) {
         if (!text->empty() && text->back() == L'\0') {
             text->pop_back();
         }
@@ -377,9 +405,9 @@ LRESULT DockWindow::OnSplitRequest(const COPYDATASTRUCT& data)
     }
 
     // An empty command asks for a pane running the profile's own shell, which
-    // is a legitimate request as long as it says where to open it. One carrying
-    // neither a command nor a directory asks for nothing at all.
-    if (command.empty() && cwd.empty()) {
+    // is a legitimate request as long as it says where to open it or which
+    // profile. One carrying none of the three asks for nothing at all.
+    if (command.empty() && cwd.empty() && profile.empty()) {
         return kSplitRejected;
     }
 
@@ -427,6 +455,7 @@ LRESULT DockWindow::OnSplitRequest(const COPYDATASTRUCT& data)
         // rather than a shell with the request in a pane below it.
         target->initial_cwd = cwd;
         target->initial_command = command;
+        target->initial_profile = profile;
         ++target->foreign_panes;
         target->own_pane_counted = true;
         log::Writef(L"split: #%d will start as %s in %s", target->id,
@@ -436,7 +465,7 @@ LRESULT DockWindow::OnSplitRequest(const COPYDATASTRUCT& data)
     }
 
     ++target->foreign_panes;
-    pending_splits_.push_back({ target->id, cwd, command });
+    pending_splits_.push_back({ target->id, cwd, command, profile });
 
     // Posted, not run. The sender is blocked in SendMessage and wt.exe takes
     // long enough to matter, and the column may not have a terminal yet.
@@ -613,7 +642,7 @@ void DockWindow::DrainPendingSplits(int column_id)
 
     for (const PendingSplit& split : mine) {
         std::wstring error;
-        if (!column->terminal->SplitPane(split.cwd, split.command, error)) {
+        if (!column->terminal->SplitPane(split.cwd, split.command, split.profile, error)) {
             log::Writef(L"split: #%d failed, %s", column_id, error.c_str());
             tray_.Notify(L"Could not add a pane: " + error);
             if (column->foreign_panes > 0) {

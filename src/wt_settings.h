@@ -15,6 +15,7 @@
 #pragma once
 
 #include <string>
+#include <vector>
 
 namespace dock {
 
@@ -80,5 +81,19 @@ struct ProfileElevation {
 /// One clause for a log line or a dialog: "profile 'PowerShell' (the default
 /// profile) has \"elevate\": true".
 [[nodiscard]] std::wstring DescribeProfileElevation(const ProfileElevation& elevation);
+
+/// A profile as the taskbar jump list shows it.
+struct ProfileEntry {
+    std::wstring name;
+    /// A local .ico, .exe or .dll the shell can draw, or empty. Windows Terminal
+    /// also accepts emoji, ms-appx URIs and images, none of which a shell link
+    /// can carry, so those come back empty and the app icon stands in.
+    std::wstring icon;
+};
+
+/// Every profile Windows Terminal shows in its own new-tab menu, in its order:
+/// named, and not marked "hidden". Empty when settings.json is missing or does
+/// not parse; the jump list then simply has no profile entries.
+[[nodiscard]] std::vector<ProfileEntry> ListProfiles();
 
 } // namespace dock

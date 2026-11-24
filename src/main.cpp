@@ -21,6 +21,7 @@
 #include "dock_window.h"
 #include "elevation.h"
 #include "ids.h"
+#include "jump_list.h"
 #include "parent_console.h"
 #include "taskbar_claim.h"
 #include "win32.h"
@@ -65,6 +66,7 @@ bool HasFlag(const std::vector<std::wstring>& args, std::wstring_view flag)
 struct PaneArgs {
     std::wstring cwd;
     std::wstring command;
+    std::wstring profile;
     bool present = false;
 };
 
@@ -77,6 +79,9 @@ PaneArgs ReadPaneArgs(const std::vector<std::wstring>& args)
             out.present = true;
         } else if (EqualsNoCase(args[i], L"--pane-run")) {
             out.command = args[i + 1];
+            out.present = true;
+        } else if (EqualsNoCase(args[i], L"--pane-profile")) {
+            out.profile = args[i + 1];
             out.present = true;
         }
     }
@@ -101,6 +106,7 @@ void ApplyOverrides(Config& cfg, const std::vector<std::wstring>& args)
     const PaneArgs pane = ReadPaneArgs(args);
     cfg.initial_pane_cwd = pane.cwd;
     cfg.initial_pane_command = pane.command;
+    cfg.initial_pane_profile = pane.profile;
 
     cfg.Clamp();
 }
@@ -124,6 +130,8 @@ void ShowUsage()
         L"new column. Exit 0 added, 5 refused, 6 window naming is off, 2 no answer.\r\n"
         L"  --pane-dir <path>          Open it in this directory.\r\n"
         L"  --pane-run <command line>  Run this instead of a shell.\r\n"
+        L"  --pane-profile <name>      Use this Windows Terminal profile. The taskbar\r\n"
+        L"                             jump list lists one entry per profile.\r\n"
         L"\r\n"
         L"Settings live in dockedconsole.json next to this executable, or in\r\n"
         L"%LOCALAPPDATA%\\DockedConsole when there is none there.\r\n"
@@ -288,8 +296,9 @@ int RequestPane(const PaneArgs& pane)
     if (dock) {
         const size_t cwd_bytes = pane.cwd.size() * sizeof(wchar_t);
         const size_t cmd_bytes = pane.command.size() * sizeof(wchar_t);
+        const size_t profile_bytes = pane.profile.size() * sizeof(wchar_t);
 
-        std::vector<char> block(sizeof(SplitRequest) + cwd_bytes + cmd_bytes);
+        std::vector<char> block(sizeof(SplitRequest) + cwd_bytes + cmd_bytes + profile_bytes);
 
         SplitRequest header{};
         header.version = kSplitRequestVersion;
@@ -298,6 +307,9 @@ int RequestPane(const PaneArgs& pane)
         header.cwd_length = static_cast<UINT32>(pane.cwd.size());
         header.cmd_offset = static_cast<UINT32>(sizeof(SplitRequest) + cwd_bytes);
         header.cmd_length = static_cast<UINT32>(pane.command.size());
+        header.profile_offset =
+            static_cast<UINT32>(sizeof(SplitRequest) + cwd_bytes + cmd_bytes);
+        header.profile_length = static_cast<UINT32>(pane.profile.size());
 
         memcpy(block.data(), &header, sizeof(header));
         if (cwd_bytes) {
@@ -305,6 +317,9 @@ int RequestPane(const PaneArgs& pane)
         }
         if (cmd_bytes) {
             memcpy(block.data() + header.cmd_offset, pane.command.data(), cmd_bytes);
+        }
+        if (profile_bytes) {
+            memcpy(block.data() + header.profile_offset, pane.profile.data(), profile_bytes);
         }
 
         COPYDATASTRUCT data{};
@@ -478,6 +493,10 @@ int RunDock(HINSTANCE instance, const std::vector<std::wstring>& args)
         return 4;
     }
 
+    // Every start, so a profile added to Windows Terminal shows up the next
+    // time the dock comes up.
+    jump_list::Publish();
+
     return dock.Run();
 }
 
@@ -502,6 +521,10 @@ int APIENTRY wWinMain(_In_ HINSTANCE instance,
 
     // What [STAThread] was buying in the C# version. ShellExecuteExW wants it.
     CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
+
+    // Before any window, so the taskbar files this process under the same app
+    // as the pinned shortcut the installer made.
+    dock::jump_list::ClaimAppId();
 
     const std::vector<std::wstring> args = dock::CommandLineArgs();
 

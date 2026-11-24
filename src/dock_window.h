@@ -103,6 +103,7 @@ private:
         /// before its terminal starts, and only then.
         std::wstring initial_cwd;
         std::wstring initial_command;
+        std::wstring initial_profile;
 
         /// The terminal window the health tick last saw, so a relaunch under
         /// onShellExit: relaunch is noticed and the new window gets fitted,
@@ -259,6 +260,7 @@ private:
         int id = 0;
         std::wstring cwd;
         std::wstring command;
+        std::wstring profile;
     };
 
     /// Requests accepted while a column's terminal was still coming up. Drained

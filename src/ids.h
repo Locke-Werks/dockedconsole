@@ -61,8 +61,8 @@ enum AddColumnResult : LRESULT {
 inline constexpr wchar_t kWindowNamePrefix[] = L"dock-";
 
 /// Identifies our WM_COPYDATA, so a stray one from anything else is ignored.
-/// Bumped if SplitRequest ever changes shape, because the sender and the
-/// receiver need not be the same build.
+/// Shape changes go through SplitRequest::version instead, so a newer dock can
+/// still read an older sender.
 inline constexpr ULONG_PTR kSplitCopyDataId = 0x44434B31;   // 'DCK1'
 
 /// A request to run something in a new pane of one of our columns.
@@ -80,9 +80,15 @@ struct SplitRequest {
     UINT32 cwd_length;
     UINT32 cmd_offset;
     UINT32 cmd_length;
+    // Version 2 and later. A version 1 header stops before these.
+    UINT32 profile_offset;
+    UINT32 profile_length;
 };
 
-inline constexpr UINT32 kSplitRequestVersion = 1;
+/// Version 2 added the profile. The dock still accepts version 1, whose header
+/// is this many bytes and carries no profile.
+inline constexpr UINT32 kSplitRequestVersion = 2;
+inline constexpr size_t kSplitRequestV1Size = 6 * sizeof(UINT32);
 
 /// What the dock answers a split request. Same contract discipline as
 /// AddColumnResult: add to the end, never renumber, and zero stays "not

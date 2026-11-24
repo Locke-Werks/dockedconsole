@@ -93,6 +93,7 @@ dockedconsole.exe --width 900         # try a width without saving it
 dockedconsole.exe --edge left         # try the other side
 
 dockedconsole.exe --pane-dir C:\src\thing --pane-run "claude --effort max"
+dockedconsole.exe --pane-profile Debian
 ```
 
 `--pane-dir` and `--pane-run` ask for a pane. When they start the dock, the
@@ -100,8 +101,14 @@ first column starts as that command in that directory rather than as a shell.
 When a dock is already up, they ask it for a pane the same way another program
 would: a column with room takes a split, a full column gets a new column, and
 the exit code says which (0 added, 5 refused, 6 window naming is off, 2 no
-answer). They are independent: a directory on its own is an ordinary shell that
-opens in the right place. Nothing here is saved. `--width` and `--edge` are read
+answer). `--pane-profile` picks the Windows Terminal profile for that pane. They
+are independent: a directory on its own is an ordinary shell that opens in the
+right place.
+
+Right-clicking the taskbar icon lists every Windows Terminal profile that is not
+hidden. Each entry runs `--pane-profile <name>`, so it starts the dock with that
+profile, or adds a pane of it when the dock is already up. The list is rebuilt
+each time the dock starts. Nothing here is saved. `--width` and `--edge` are read
 by the first instance only.
 
 ### Columns
@@ -360,23 +367,29 @@ HWND dock = FindWindowW(L"DockedConsole.Host", L"Docked Console");
 
 COPYDATASTRUCT data{};
 data.dwData = 0x44434B31;   // 'DCK1'
-data.cbData = /* header + both strings */;
+data.cbData = /* header + the strings */;
 data.lpData = block;
 
 SendMessageTimeoutW(dock, WM_COPYDATA, 0, reinterpret_cast<LPARAM>(&data),
                     SMTO_ABORTIFHUNG | SMTO_ERRORONEXIT, 5000, &answer);
 ```
 
-The block is `SplitRequest` from `src/ids.h` followed by the two wide strings,
+The block is `SplitRequest` from `src/ids.h` followed by its wide strings,
 back to back and without terminators: the lengths say where each ends, and a
 terminator counted into a length is tolerated. Offsets are bytes from the start
 of the block, lengths are in WCHARs, and every one of them is checked against
 `cbData` before a character is read. A string with a NUL inside it is refused,
 since `CreateProcessW` would cut the `wt` command line there.
 
-The two strings are independent. A command with no directory is that command
+Version 2 adds a third string, the Windows Terminal profile for the pane. A
+version 1 block, whose header stops after `cmd_length`, is still accepted and
+gets the configured `terminalProfile` as before. A dock older than 0.5.0 refuses
+a version 2 block as malformed.
+
+The strings are independent. A command with no directory is that command
 wherever the profile starts; a directory with no command is an ordinary shell
-opened there. A request carrying neither is refused, since it asks for nothing.
+opened there; a profile on its own is that profile's shell. A request carrying
+none of them is refused, since it asks for nothing.
 
 The answer is one of `SplitResult`, and the numbers are contract: add to the
 end, never renumber.

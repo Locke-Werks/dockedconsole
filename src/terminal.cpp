@@ -230,14 +230,15 @@ Terminal::~Terminal()
     Release();
 }
 
-void Terminal::SetInitialCommand(std::wstring cwd, std::wstring command)
+void Terminal::SetInitialCommand(std::wstring cwd, std::wstring command, std::wstring profile)
 {
     initial_cwd_ = std::move(cwd);
     initial_command_ = std::move(command);
+    initial_profile_ = std::move(profile);
 }
 
 bool Terminal::SplitPane(const std::wstring& cwd, const std::wstring& command,
-                         std::wstring& error)
+                         const std::wstring& profile, std::wstring& error)
 {
     if (window_name_.empty()) {
         error = L"this column's window has no name, so a pane cannot be added to it";
@@ -262,8 +263,9 @@ bool Terminal::SplitPane(const std::wstring& cwd, const std::wstring& command,
     std::wstring line = L"\"" + wt + L"\" -w " + QuoteArg(window_name_)
                       + L" split-pane -H -s 0.5";
 
-    if (!cfg_.terminal_profile.empty()) {
-        line += L" -p " + QuoteArg(cfg_.terminal_profile);
+    const std::wstring& pane_profile = profile.empty() ? cfg_.terminal_profile : profile;
+    if (!pane_profile.empty()) {
+        line += L" -p " + QuoteArg(pane_profile);
     }
     if (!cwd.empty()) {
         line += L" -d " + QuoteArg(cwd);
@@ -338,6 +340,11 @@ bool Terminal::Launch()
     // The two are independent. A directory with no command is an ordinary shell
     // that happens to start in the right place, and gating -d behind the command
     // would silently drop the directory for exactly that case.
+    // A profile asked for by name, from the jump list or --pane-profile. Only
+    // this column's own first pane; terminalArgs still governs everything else.
+    if (!initial_profile_.empty()) {
+        command_line += L" -p " + QuoteArg(initial_profile_);
+    }
     if (!initial_cwd_.empty()) {
         command_line += L" -d " + QuoteArg(initial_cwd_);
     }

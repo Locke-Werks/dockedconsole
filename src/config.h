@@ -113,6 +113,10 @@ struct Config {
     std::wstring initial_pane_cwd;
     std::wstring initial_pane_command;
 
+    /// Windows Terminal profile for that first pane, from --pane-profile, which
+    /// is what the taskbar jump list passes. Same one-shot rules.
+    std::wstring initial_pane_profile;
+
     /// Profile for panes added to a column later, empty for the default.
     ///
     /// Worth having because a profile can carry "elevate": true, and Windows

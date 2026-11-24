@@ -227,4 +227,69 @@ std::wstring DescribeProfileElevation(const ProfileElevation& elevation)
     return text;
 }
 
+std::vector<ProfileEntry> ListProfiles()
+{
+    std::vector<ProfileEntry> out;
+
+    const std::wstring path = TerminalSettingsPath();
+    std::wstring text;
+    if (path.empty() || !ReadUtf8File(path, text)) {
+        return out;
+    }
+
+    json::Object root;
+    std::wstring error;
+    json::ParseOptions options;
+    options.allow_nesting = true;
+    if (!json::ParseObject(text, root, error, options)) {
+        return out;
+    }
+
+    const json::Value* profiles = json::Find(root, L"profiles");
+    if (!profiles || profiles->type != json::Value::Type::Object) {
+        return out;
+    }
+    const json::Value* list = json::Find(*profiles, L"list");
+    if (!list || list->type != json::Value::Type::Array) {
+        return out;
+    }
+
+    for (const json::Value& profile : list->array) {
+        if (profile.type != json::Value::Type::Object) {
+            continue;
+        }
+        const json::Value* hidden = json::Find(profile, L"hidden");
+        if (hidden && hidden->type == json::Value::Type::Bool && hidden->boolean) {
+            continue;
+        }
+        const json::Value* name = json::Find(profile, L"name");
+        if (!IsString(name) || name->string.empty()) {
+            continue;
+        }
+
+        ProfileEntry entry;
+        entry.name = name->string;
+
+        const json::Value* icon = json::Find(profile, L"icon");
+        if (IsString(icon) && !icon->string.empty()) {
+            wchar_t expanded[MAX_PATH * 2] = {};
+            const DWORD length =
+                ExpandEnvironmentStringsW(icon->string.c_str(), expanded, ARRAYSIZE(expanded));
+            if (length > 0 && length <= ARRAYSIZE(expanded)) {
+                const std::wstring candidate = expanded;
+                const size_t dot = candidate.rfind(L'.');
+                const std::wstring ext = dot == std::wstring::npos ? L"" : candidate.substr(dot);
+                if ((EqualsNoCase(ext, L".ico") || EqualsNoCase(ext, L".exe")
+                     || EqualsNoCase(ext, L".dll"))
+                    && FileExists(candidate)) {
+                    entry.icon = candidate;
+                }
+            }
+        }
+
+        out.push_back(std::move(entry));
+    }
+    return out;
+}
+
 } // namespace dock

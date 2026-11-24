@@ -48,6 +48,7 @@ add_executable(dockedconsole WIN32
     src/json.cpp
     src/config.cpp
     src/wt_settings.cpp
+    src/jump_list.cpp
     src/monitors.cpp
     src/diag_log.cpp
     src/elevation.cpp
@@ -86,6 +87,7 @@ target_link_libraries(dockedconsole PRIVATE
     dwmapi      # DWMWA_EXTENDED_FRAME_BOUNDS and DWMWA_CLOAKED, the enforcer's eyes
     shlwapi
     pathcch     # long-path-safe path building; the manifest is longPathAware
+    propsys     # InitPropVariantFromString, for the jump list titles
 )
 
 dock_apply_warnings(dockedconsole)
